@@ -6,12 +6,40 @@ doca_lib_dir = '/opt/mellanox/doca/lib/' + host_machine.cpu_family() + '-linux-g
 spdk_root = get_option('spdk_root')
 spdk_inc_dir = spdk_root / 'include'
 spdk_internal_inc_dir = spdk_root / 'lib' / 'nvme'
-spdk_lib_dir = spdk_root / 'build' / 'lib'
+spdk_pkgconfig_dir = get_option('spdk_pkgconfig_dir')
 
 doca_common = cc.find_library('doca_common', dirs : doca_lib_dir, required : true)
 spdk_inc = include_directories(spdk_inc_dir, spdk_internal_inc_dir)
-spdk_nvme = cc.find_library('spdk_nvme', dirs : spdk_lib_dir, required : true)
-spdk_env_dpdk = cc.find_library('spdk_env_dpdk', dirs : spdk_lib_dir, required : true)
+
+spdk_pkg_env = environment()
+spdk_pkg_env.prepend('PKG_CONFIG_PATH', spdk_pkgconfig_dir)
+
+spdk_cflags_cmd = run_command(
+  'pkg-config',
+  '--cflags',
+  'spdk_nvme',
+  env : spdk_pkg_env,
+  check : false,
+)
+if spdk_cflags_cmd.returncode() != 0
+  error('Failed to resolve SPDK cflags via pkg-config for spdk_nvme')
+endif
+
+spdk_link_cmd = run_command(
+  'pkg-config',
+  '--libs',
+  '--static',
+  'spdk_nvme',
+  'spdk_env_dpdk',
+  env : spdk_pkg_env,
+  check : false,
+)
+if spdk_link_cmd.returncode() != 0
+  error('Failed to resolve SPDK static link flags via pkg-config for spdk_nvme/spdk_env_dpdk')
+endif
+
+spdk_cflags = spdk_cflags_cmd.stdout().strip().split()
+spdk_link_args = spdk_link_cmd.stdout().strip().split()
 
 executable(
   'doca-sta-tool',
@@ -22,8 +50,9 @@ executable(
     'doorbell_polling.c',
   ],
   include_directories : [doca_inc, spdk_inc],
-  dependencies : [doca_common, spdk_nvme, spdk_env_dpdk],
-  cpp_args : ['-pthread'],
-  link_args : ['-pthread'],
+  dependencies : [doca_common],
+  c_args : spdk_cflags,
+  cpp_args : ['-pthread'] + spdk_cflags,
+  link_args : ['-pthread'] + spdk_link_args,
   install : false,
 )

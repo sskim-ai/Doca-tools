@@ -4,3 +4,10 @@ option(
   value : '/home/skhynix/spdk',
   description : 'Root directory of the SPDK source/build tree',
 )
+
+option(
+  'spdk_pkgconfig_dir',
+  type : 'string',
+  value : '/home/skhynix/spdk/build/lib/pkgconfig',
+  description : 'Directory containing SPDK pkg-config files',
+)
