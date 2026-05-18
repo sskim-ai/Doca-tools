@@ -90,6 +90,22 @@ real MMIO write
 ./build/doca-sta-tool 0000:xx:yy.z
 ```
 
+사내에서 `git pull -> meson setup -> meson compile -> 실행` 을 한 번에 하려면 루트 디렉터리에서 아래 스크립트를 사용할 수 있다.
+
+```bash
+./scripts/pull-build-run-doca-sta-tool.sh 0000:xx:yy.z
+```
+
+필요하면 아래 환경변수로 SPDK/DPDK 경로를 덮어쓸 수 있다.
+
+```bash
+SPDK_ROOT=/home/skhynix/spdk
+SPDK_PKGCONFIG_DIR=/home/skhynix/spdk/build/lib/pkgconfig
+SPDK_DPDK_LIB_DIR=/home/skhynix/spdk/dpdk/build/lib
+SPDK_DPDK_TMP_LIB_DIR=/home/skhynix/spdk/dpdk/build-tmp/lib
+MELLANOX_DPDK_LIB_DIR=/opt/mellanox/dpdk/lib/x86_64-linux-gnu
+```
+
 ## 8. 알려진 한계
 
 - SPDK public API가 아니라 internal header에 의존하므로 SPDK 버전에 취약하다.
