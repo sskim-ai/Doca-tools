@@ -35,6 +35,7 @@ struct spdk_doca_queue_resources {
 
 int spdk_nvme_qpair_export_doca_resources(
     struct spdk_nvme_qpair *qpair,
+    uint16_t queue_depth,
     struct spdk_doca_queue_resources *out
 );
 

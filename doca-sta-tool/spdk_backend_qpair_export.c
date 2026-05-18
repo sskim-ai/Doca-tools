@@ -94,7 +94,7 @@ int spdk_backend_qpair_export(
     if (!qpair)
         return -3;
 
-    if (spdk_nvme_qpair_export_doca_resources(qpair, out) != 0) {
+    if (spdk_nvme_qpair_export_doca_resources(qpair, qopts.io_queue_size, out) != 0) {
         spdk_nvme_ctrlr_free_io_qpair(qpair);
         return -4;
     }

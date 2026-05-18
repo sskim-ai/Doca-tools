@@ -8,11 +8,12 @@
 
 int spdk_nvme_qpair_export_doca_resources(
     struct spdk_nvme_qpair *qpair,
+    uint16_t queue_depth,
     struct spdk_doca_queue_resources *out)
 {
     struct nvme_pcie_qpair *pqpair;
 
-    if (!qpair || !out)
+    if (!qpair || !out || queue_depth == 0)
         return -1;
 
     memset(out, 0, sizeof(*out));
@@ -24,8 +25,8 @@ int spdk_nvme_qpair_export_doca_resources(
     out->sq_addr = pqpair->cmd;
     out->cq_addr = pqpair->cpl;
 
-    out->sq_len = qpair->num_entries * sizeof(struct spdk_nvme_cmd);
-    out->cq_len = qpair->num_entries * sizeof(struct spdk_nvme_cpl);
+    out->sq_len = queue_depth * sizeof(struct spdk_nvme_cmd);
+    out->cq_len = queue_depth * sizeof(struct spdk_nvme_cpl);
 
     out->dummy_db_page_len = 4096;
     out->dummy_db_page_addr =
@@ -44,8 +45,13 @@ int spdk_nvme_qpair_export_doca_resources(
     out->sq_db_offset = 0;
     out->cq_db_offset = 64;
 
-    out->qid = qpair->id;
-    out->num_entries = qpair->num_entries;
+    /*
+     * Newer SPDK versions no longer expose qpair internals such as id/num_entries
+     * through struct spdk_nvme_qpair, so keep the export path tied to the qpair
+     * allocation options and leave qid unset until a stable source is required.
+     */
+    out->qid = 0;
+    out->num_entries = queue_depth;
 
     return 0;
 }
