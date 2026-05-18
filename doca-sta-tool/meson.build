@@ -9,6 +9,9 @@ spdk_internal_inc_dir = spdk_root / 'lib' / 'nvme'
 spdk_pkgconfig_dir = get_option('spdk_pkgconfig_dir')
 
 doca_common = cc.find_library('doca_common', dirs : doca_lib_dir, required : true)
+openssl_ssl = cc.find_library('ssl', required : true)
+openssl_crypto = cc.find_library('crypto', required : true)
+libuuid = cc.find_library('uuid', required : true)
 spdk_inc = include_directories(spdk_inc_dir, spdk_internal_inc_dir)
 
 spdk_pkg_env = environment()
@@ -50,7 +53,7 @@ executable(
     'doorbell_polling.c',
   ],
   include_directories : [doca_inc, spdk_inc],
-  dependencies : [doca_common],
+  dependencies : [doca_common, openssl_ssl, openssl_crypto, libuuid],
   c_args : spdk_cflags,
   cpp_args : ['-pthread'] + spdk_cflags,
   link_args : ['-pthread'] + spdk_link_args,
