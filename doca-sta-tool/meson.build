@@ -43,6 +43,18 @@ endif
 
 spdk_cflags = spdk_cflags_cmd.stdout().strip().split()
 spdk_link_args = spdk_link_cmd.stdout().strip().split()
+runtime_lib_dirs = []
+runtime_rpath = ''
+
+foreach arg : spdk_link_args
+  if arg.startswith('-L')
+    runtime_lib_dirs += [arg.substring(2)]
+  endif
+endforeach
+
+if runtime_lib_dirs.length() > 0
+  runtime_rpath = runtime_lib_dirs.join(':')
+endif
 
 executable(
   'doca-sta-tool',
@@ -57,5 +69,7 @@ executable(
   c_args : spdk_cflags,
   cpp_args : ['-pthread'] + spdk_cflags,
   link_args : ['-pthread'] + spdk_link_args,
+  build_rpath : runtime_rpath,
+  install_rpath : runtime_rpath,
   install : false,
 )
