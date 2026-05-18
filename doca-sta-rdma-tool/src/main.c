@@ -33,6 +33,40 @@ struct device_selector {
 };
 
 static void
+dump_doca_devices(void)
+{
+	struct doca_devinfo **dev_list = NULL;
+	uint32_t nb_devs = 0;
+	doca_error_t result;
+
+	result = doca_devinfo_create_list(&dev_list, &nb_devs);
+	if (result != DOCA_SUCCESS) {
+		fprintf(stderr, "Failed to enumerate DOCA devices: %s\n", doca_error_get_descr(result));
+		return;
+	}
+
+	printf("Available DOCA devices:\n");
+	for (uint32_t i = 0; i < nb_devs; ++i) {
+		char pci_addr[32] = {0};
+		char iface_name[64] = {0};
+		doca_error_t pci_result;
+		doca_error_t iface_result;
+		doca_error_t sta_result;
+
+		pci_result = doca_devinfo_get_pci_addr_str(dev_list[i], pci_addr);
+		iface_result = doca_devinfo_get_iface_name(dev_list[i], iface_name, sizeof(iface_name));
+		sta_result = doca_sta_cap_is_supported(dev_list[i]);
+
+		printf("  - pci=%s iface=%s sta_cap=%s\n",
+		       pci_result == DOCA_SUCCESS ? pci_addr : "n/a",
+		       iface_result == DOCA_SUCCESS ? iface_name : "n/a",
+		       sta_result == DOCA_SUCCESS ? "yes" : "no");
+	}
+
+	(void)doca_devinfo_destroy_list(dev_list);
+}
+
+static void
 ctx_state_changed_cb(const union doca_data user_data,
 		     struct doca_ctx *ctx,
 		     enum doca_ctx_states prev_state,
@@ -174,10 +208,11 @@ print_usage(const char *argv0)
 {
 	fprintf(stderr,
 		"Usage: %s [control-pci-or-iface] [network-pci-or-iface]\n"
+		"       %s --list\n"
 		"Examples:\n"
 		"  %s ens5008f0np0 endaf0pf0sf88\n"
 		"  %s 0000:da:00.0 endaf0pf0sf88\n",
-		argv0, argv0, argv0);
+		argv0, argv0, argv0, argv0);
 }
 
 static void
@@ -214,6 +249,11 @@ main(int argc, char **argv)
 	struct app_state app = {0};
 	doca_error_t result;
 
+	if (argc == 2 && strcmp(argv[1], "--list") == 0) {
+		dump_doca_devices();
+		return 0;
+	}
+
 	if (argc > 3) {
 		print_usage(argv[0]);
 		return 1;
@@ -228,6 +268,7 @@ main(int argc, char **argv)
 	if (result != DOCA_SUCCESS) {
 		fprintf(stderr, "Failed to open required DOCA device(s): %s\n",
 			doca_error_get_descr(result));
+		dump_doca_devices();
 		return 1;
 	}
 
