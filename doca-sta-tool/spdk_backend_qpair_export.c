@@ -28,6 +28,11 @@ int spdk_backend_init_env(const char *app_name, int shm_id)
     spdk_env_opts_init(&opts);
     opts.name = app_name;
     opts.shm_id = shm_id;
+    /*
+     * In containerized or restricted environments physical addresses may not
+     * be available, so force DPDK to use virtual-address IOVA mode.
+     */
+    opts.iova_mode = "va";
 
     if (spdk_env_init(&opts) < 0)
         return -1;
