@@ -1,20 +1,21 @@
 # DOCA STA RDMA Tool
 
-This directory contains a fresh host-side PoC for the path:
+This directory contains a host-side STA bring-up probe for the path:
 
 `host -> DPU (NIC mode, Ethernet mode) -> remote storage`
 
-The goal of this PoC is not local SPDK NVMe queue export. The first milestone is to verify that a host process can:
+The immediate goal is narrower than remote IO. This tool verifies only that a host process can:
 
-1. Open a DOCA device exposed by a BlueField in NIC mode.
-2. Confirm that the device reports STA capability.
-3. Create and start a `doca_sta` control context.
-4. Create and start a `doca_sta_io` context on the same progress engine.
+1. Open a PF control device.
+2. Open an SF/network device.
+3. Create a `doca_sta` context on the PF.
+4. Add the SF/network device to that STA context.
+5. Start the main STA context and wait for `RUNNING`.
 
 Only after that baseline is stable should the code grow into:
 
 1. Remote subsystem / namespace configuration.
-2. STA IO path bring-up to a remote storage target.
+2. STA IO context bring-up.
 3. Synthetic host-side IO submission.
 4. GPU-originated IO submission.
 
@@ -34,37 +35,33 @@ meson compile -C build
 
 ## Run
 
-Without arguments, the tool uses these defaults:
-
-- control device: `ens5008f0np0`
-- network device: `endaf0pf0sf88`
+List what DOCA sees on the host:
 
 ```bash
-./build/doca-sta-rdma-tool
+./build/doca-sta-rdma-tool --list
 ```
 
-To override the control and network devices, pass interface names, PCI BDFs, or IB device names:
+Run the main-context probe:
 
 ```bash
-./build/doca-sta-rdma-tool ens5008f0np0 endaf0pf0sf88
-./build/doca-sta-rdma-tool 0000:da:00.0 endaf0pf0sf88
-./build/doca-sta-rdma-tool mlx5_3 mlx5_2
+./build/doca-sta-rdma-tool --pf-dev 0000:da:00.0 --sf-dev enpdas0f0s88
+./build/doca-sta-rdma-tool --pf-dev 0000:da:00.0 --sf-dev mlx5_4
 ```
 
 ## Current Scope
 
-This tool currently validates only host-side DOCA STA bring-up:
+This tool currently validates only main STA context bring-up:
 
 - device discovery
 - STA capability check
 - `doca_sta` create/add_dev/start
-- `doca_sta_io` create/start
 - progress engine integration
 
 It does not yet configure:
 
 - backend handles
 - subsystems / namespaces
+- `doca_sta_io`
 - QPs
 - remote IO submission
 

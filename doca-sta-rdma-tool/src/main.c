@@ -1,6 +1,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <doca_ctx.h>
@@ -8,22 +9,23 @@
 #include <doca_error.h>
 #include <doca_pe.h>
 #include <doca_sta.h>
-#include <doca_sta_io.h>
+
+struct config {
+	const char *pf_dev;
+	const char *sf_dev;
+};
 
 struct app_state {
-	struct doca_pe *sta_pe;
-	struct doca_pe *sta_io_pe;
-	struct doca_dev *ctrl_dev;
-	struct doca_dev *net_dev;
+	struct config cfg;
+	struct doca_dev *pf_dev;
+	struct doca_dev *sf_dev;
 	struct doca_sta *sta;
-	struct doca_sta_io *sta_io;
-	bool sta_running;
-	bool sta_io_running;
+	struct doca_ctx *main_ctx;
+	struct doca_pe *main_pe;
 };
 
 enum selector_type {
-	SELECTOR_ANY = 0,
-	SELECTOR_PCI,
+	SELECTOR_PCI = 0,
 	SELECTOR_IFACE,
 	SELECTOR_IBDEV,
 };
@@ -32,6 +34,23 @@ struct device_selector {
 	enum selector_type type;
 	const char *value;
 };
+
+static const char *
+ctx_state_to_str(enum doca_ctx_states state)
+{
+	switch (state) {
+	case DOCA_CTX_STATE_IDLE:
+		return "IDLE";
+	case DOCA_CTX_STATE_STARTING:
+		return "STARTING";
+	case DOCA_CTX_STATE_RUNNING:
+		return "RUNNING";
+	case DOCA_CTX_STATE_STOPPING:
+		return "STOPPING";
+	default:
+		return "UNKNOWN";
+	}
+}
 
 static void
 dump_doca_devices(void)
@@ -72,119 +91,105 @@ dump_doca_devices(void)
 }
 
 static void
+dump_devinfo(const char *tag, struct doca_dev *dev)
+{
+	const struct doca_devinfo *info = doca_dev_as_devinfo(dev);
+	char pci_addr[32] = {0};
+	char iface_name[64] = {0};
+	char ibdev_name[64] = {0};
+
+	if (info == NULL) {
+		printf("[DBG] %s devinfo=null\n", tag);
+		return;
+	}
+
+	if (doca_devinfo_get_pci_addr_str(info, pci_addr) != DOCA_SUCCESS)
+		strcpy(pci_addr, "<n/a>");
+	if (doca_devinfo_get_iface_name(info, iface_name, sizeof(iface_name)) != DOCA_SUCCESS)
+		strcpy(iface_name, "<n/a>");
+	if (doca_devinfo_get_ibdev_name(info, ibdev_name, sizeof(ibdev_name)) != DOCA_SUCCESS)
+		strcpy(ibdev_name, "<n/a>");
+
+	printf("[DBG] %s pci=%s iface=%s ibdev=%s\n", tag, pci_addr, iface_name, ibdev_name);
+}
+
+static void
+dump_ctx_state(const char *tag, struct doca_ctx *ctx)
+{
+	enum doca_ctx_states state;
+	doca_error_t result;
+
+	result = doca_ctx_get_state(ctx, &state);
+	if (result != DOCA_SUCCESS) {
+		printf("[DBG] %s state query failed: %s\n", tag, doca_error_get_descr(result));
+		return;
+	}
+
+	printf("[DBG] %s state=%s (%d)\n", tag, ctx_state_to_str(state), state);
+}
+
+static void
 ctx_state_changed_cb(const union doca_data user_data,
 		     struct doca_ctx *ctx,
 		     enum doca_ctx_states prev_state,
 		     enum doca_ctx_states next_state)
 {
-	const char *label = user_data.ptr;
-
 	(void)ctx;
-	printf("[%s] ctx state changed: %d -> %d\n", label, prev_state, next_state);
+	printf("[DBG] %s state changed: %s -> %s\n",
+	       (const char *)user_data.ptr,
+	       ctx_state_to_str(prev_state),
+	       ctx_state_to_str(next_state));
+}
+
+static void
+progress_ctx_for_debug(struct doca_pe *pe, struct doca_ctx *ctx, const char *tag, int loops)
+{
+	for (int i = 0; i < loops; ++i) {
+		int progressed = doca_pe_progress(pe);
+
+		if ((i % 100) == 0) {
+			enum doca_ctx_states state;
+			doca_error_t result = doca_ctx_get_state(ctx, &state);
+			if (result == DOCA_SUCCESS) {
+				printf("[DBG] %s loop=%d progressed=%d state=%s\n",
+				       tag, i, progressed, ctx_state_to_str(state));
+			} else {
+				printf("[DBG] %s loop=%d progressed=%d state_query=%s\n",
+				       tag, i, progressed, doca_error_get_descr(result));
+			}
+		}
+	}
 }
 
 static doca_error_t
-wait_for_running(struct app_state *app)
+wait_until_running(struct doca_pe *pe, struct doca_ctx *ctx, const char *name)
 {
-	for (uint32_t i = 0; i < 10000; ++i) {
-		enum doca_ctx_states sta_state = DOCA_CTX_STATE_IDLE;
-		enum doca_ctx_states sta_io_state = DOCA_CTX_STATE_IDLE;
-		doca_error_t result;
+	for (int i = 0; i < 5000; ++i) {
+		enum doca_ctx_states state;
+		doca_error_t result = doca_ctx_get_state(ctx, &state);
 
-		result = doca_ctx_get_state(doca_sta_as_ctx(app->sta), &sta_state);
 		if (result != DOCA_SUCCESS)
 			return result;
 
-		result = doca_ctx_get_state(doca_sta_io_as_ctx(app->sta_io), &sta_io_state);
-		if (result != DOCA_SUCCESS)
-			return result;
+		if ((i % 100) == 0)
+			printf("[DBG] %s wait_loop=%d state=%s\n", name, i, ctx_state_to_str(state));
 
-		app->sta_running = (sta_state == DOCA_CTX_STATE_RUNNING);
-		app->sta_io_running = (sta_io_state == DOCA_CTX_STATE_RUNNING);
-
-		if (app->sta_running && app->sta_io_running)
+		if (state == DOCA_CTX_STATE_RUNNING)
 			return DOCA_SUCCESS;
 
-		if (app->sta_pe != NULL)
-			(void)doca_pe_progress(app->sta_pe);
-		if (app->sta_io_pe != NULL)
-			(void)doca_pe_progress(app->sta_io_pe);
+		if (state == DOCA_CTX_STATE_IDLE || state == DOCA_CTX_STATE_STOPPING)
+			return DOCA_ERROR_BAD_STATE;
+
+		(void)doca_pe_progress(pe);
 	}
 
 	return DOCA_ERROR_TIME_OUT;
 }
 
-static doca_error_t
-open_doca_device(const struct device_selector *selector,
-		 bool require_sta_cap,
-		 struct doca_dev **dev)
-{
-	struct doca_devinfo **dev_list = NULL;
-	uint32_t nb_devs = 0;
-	doca_error_t result;
-
-	result = doca_devinfo_create_list(&dev_list, &nb_devs);
-	if (result != DOCA_SUCCESS)
-		return result;
-
-	for (uint32_t i = 0; i < nb_devs; ++i) {
-		char pci_addr[32] = {0};
-		char iface_name[64] = {0};
-		char ibdev_name[64] = {0};
-		bool selector_match = false;
-
-		result = doca_devinfo_get_pci_addr_str(dev_list[i], pci_addr);
-		if (selector == NULL || selector->type == SELECTOR_ANY) {
-			selector_match = true;
-		} else if (selector->type == SELECTOR_PCI) {
-			selector_match = (result == DOCA_SUCCESS) && (strcmp(selector->value, pci_addr) == 0);
-		} else if (selector->type == SELECTOR_IFACE) {
-			result = doca_devinfo_get_iface_name(dev_list[i], iface_name, sizeof(iface_name));
-			selector_match = (result == DOCA_SUCCESS) && (strcmp(selector->value, iface_name) == 0);
-		} else if (selector->type == SELECTOR_IBDEV) {
-			result = doca_devinfo_get_ibdev_name(dev_list[i], ibdev_name, sizeof(ibdev_name));
-			selector_match = (result == DOCA_SUCCESS) && (strcmp(selector->value, ibdev_name) == 0);
-		}
-
-		if (!selector_match)
-			continue;
-
-		if (require_sta_cap) {
-			result = doca_sta_cap_is_supported(dev_list[i]);
-			if (result != DOCA_SUCCESS)
-				continue;
-		}
-
-		if (iface_name[0] == '\0')
-			(void)doca_devinfo_get_iface_name(dev_list[i], iface_name, sizeof(iface_name));
-		if (ibdev_name[0] == '\0')
-			(void)doca_devinfo_get_ibdev_name(dev_list[i], ibdev_name, sizeof(ibdev_name));
-
-		result = doca_dev_open(dev_list[i], dev);
-		if (result == DOCA_SUCCESS) {
-			printf("Selected DOCA device: pci=%s iface=%s ibdev=%s\n",
-			       pci_addr[0] != '\0' ? pci_addr : "unknown",
-			       iface_name[0] != '\0' ? iface_name : "unknown",
-			       ibdev_name[0] != '\0' ? ibdev_name : "unknown");
-		}
-		(void)doca_devinfo_destroy_list(dev_list);
-		return result;
-	}
-
-	(void)doca_devinfo_destroy_list(dev_list);
-	return DOCA_ERROR_NOT_FOUND;
-}
-
 static struct device_selector
 parse_selector(const char *value)
 {
-	struct device_selector selector = {
-		.type = SELECTOR_ANY,
-		.value = NULL,
-	};
-
-	if (value == NULL)
-		return selector;
+	struct device_selector selector;
 
 	if (strchr(value, ':') != NULL) {
 		selector.type = SELECTOR_PCI;
@@ -204,208 +209,223 @@ parse_selector(const char *value)
 }
 
 static doca_error_t
-open_sta_devices(const struct device_selector *ctrl_selector,
-		 const struct device_selector *net_selector,
-		 struct app_state *app)
+open_local_dev(const struct device_selector *selector, struct doca_dev **out)
 {
+	struct doca_devinfo **dev_list = NULL;
+	uint32_t nb_devs = 0;
 	doca_error_t result;
 
-	result = open_doca_device(ctrl_selector, true, &app->ctrl_dev);
+	result = doca_devinfo_create_list(&dev_list, &nb_devs);
 	if (result != DOCA_SUCCESS)
 		return result;
 
-	result = open_doca_device(net_selector, false, &app->net_dev);
-	if (result != DOCA_SUCCESS)
+	for (uint32_t i = 0; i < nb_devs; ++i) {
+		char pci_addr[32] = {0};
+		char iface_name[64] = {0};
+		char ibdev_name[64] = {0};
+		bool match = false;
+
+		(void)doca_devinfo_get_pci_addr_str(dev_list[i], pci_addr);
+		(void)doca_devinfo_get_iface_name(dev_list[i], iface_name, sizeof(iface_name));
+		(void)doca_devinfo_get_ibdev_name(dev_list[i], ibdev_name, sizeof(ibdev_name));
+
+		if (selector->type == SELECTOR_PCI)
+			match = (strcmp(selector->value, pci_addr) == 0);
+		else if (selector->type == SELECTOR_IFACE)
+			match = (strcmp(selector->value, iface_name) == 0);
+		else if (selector->type == SELECTOR_IBDEV)
+			match = (strcmp(selector->value, ibdev_name) == 0);
+
+		if (!match)
+			continue;
+
+		result = doca_dev_open(dev_list[i], out);
+		if (result == DOCA_SUCCESS) {
+			printf("[OK] opened DOCA dev selector=%s pci=%s iface=%s ibdev=%s\n",
+			       selector->value, pci_addr[0] != '\0' ? pci_addr : "<n/a>",
+			       iface_name[0] != '\0' ? iface_name : "<n/a>",
+			       ibdev_name[0] != '\0' ? ibdev_name : "<n/a>");
+		}
+		(void)doca_devinfo_destroy_list(dev_list);
 		return result;
+	}
 
-	return DOCA_SUCCESS;
-}
-
-static void
-print_usage(const char *argv0)
-{
-	fprintf(stderr,
-		"Usage: %s [control-pci-or-iface] [network-pci-or-iface]\n"
-		"       %s --list\n"
-		"Examples:\n"
-		"  %s ens5008f0np0 endaf0pf0sf88\n"
-		"  %s 0000:da:00.0 endaf0pf0sf88\n"
-		"  %s mlx5_3 mlx5_2\n",
-		argv0, argv0, argv0, argv0, argv0);
+	(void)doca_devinfo_destroy_list(dev_list);
+	return DOCA_ERROR_NOT_FOUND;
 }
 
 static void
 cleanup(struct app_state *app)
 {
-	if (app->sta_io != NULL) {
-		(void)doca_ctx_stop(doca_sta_io_as_ctx(app->sta_io));
-		(void)doca_sta_io_destroy(app->sta_io);
+	if (app->main_ctx != NULL) {
+		(void)doca_ctx_stop(app->main_ctx);
+		for (int i = 0; i < 5000; ++i)
+			(void)doca_pe_progress(app->main_pe);
 	}
 
-	if (app->sta != NULL) {
-		(void)doca_ctx_stop(doca_sta_as_ctx(app->sta));
+	if (app->main_pe != NULL)
+		(void)doca_pe_destroy(app->main_pe);
+
+	if (app->sta != NULL)
 		(void)doca_sta_destroy(app->sta);
+
+	if (app->sf_dev != NULL)
+		(void)doca_dev_close(app->sf_dev);
+
+	if (app->pf_dev != NULL)
+		(void)doca_dev_close(app->pf_dev);
+}
+
+static void
+usage(const char *prog)
+{
+	fprintf(stderr,
+		"Usage:\n"
+		"  %s --pf-dev <PCI_BDF> --sf-dev <PCI_BDF|IFACE|IBDEV>\n"
+		"  %s --list\n",
+		prog, prog);
+}
+
+static int
+parse_args(int argc, char **argv, struct config *cfg)
+{
+	for (int i = 1; i < argc; ++i) {
+		if (strcmp(argv[i], "--list") == 0) {
+			dump_doca_devices();
+			return 1;
+		}
+
+		if (strcmp(argv[i], "--pf-dev") == 0 && i + 1 < argc) {
+			cfg->pf_dev = argv[++i];
+			continue;
+		}
+
+		if (strcmp(argv[i], "--sf-dev") == 0 && i + 1 < argc) {
+			cfg->sf_dev = argv[++i];
+			continue;
+		}
+
+		fprintf(stderr, "unknown or incomplete arg: %s\n", argv[i]);
+		return -1;
 	}
 
-	if (app->sta_io_pe != NULL)
-		(void)doca_pe_destroy(app->sta_io_pe);
+	if (cfg->pf_dev == NULL || cfg->sf_dev == NULL)
+		return -1;
 
-	if (app->sta_pe != NULL)
-		(void)doca_pe_destroy(app->sta_pe);
-
-	if (app->net_dev != NULL && app->net_dev != app->ctrl_dev)
-		(void)doca_dev_close(app->net_dev);
-
-	if (app->ctrl_dev != NULL)
-		(void)doca_dev_close(app->ctrl_dev);
+	return 0;
 }
 
 int
 main(int argc, char **argv)
 {
-	struct device_selector ctrl_selector = { .type = SELECTOR_IFACE, .value = "ens5008f0np0" };
-	struct device_selector net_selector = { .type = SELECTOR_IFACE, .value = "endaf0pf0sf88" };
 	struct app_state app = {0};
+	struct device_selector pf_selector;
+	struct device_selector sf_selector;
 	doca_error_t result;
+	int parse_rc;
 
-	if (argc == 2 && strcmp(argv[1], "--list") == 0) {
-		dump_doca_devices();
+	parse_rc = parse_args(argc, argv, &app.cfg);
+	if (parse_rc > 0)
 		return 0;
-	}
-
-	if (argc > 3) {
-		print_usage(argv[0]);
+	if (parse_rc < 0) {
+		usage(argv[0]);
 		return 1;
 	}
 
-	if (argc >= 2)
-		ctrl_selector = parse_selector(argv[1]);
-	if (argc == 3)
-		net_selector = parse_selector(argv[2]);
+	pf_selector = parse_selector(app.cfg.pf_dev);
+	sf_selector = parse_selector(app.cfg.sf_dev);
 
-	result = open_sta_devices(&ctrl_selector, &net_selector, &app);
+	result = open_local_dev(&pf_selector, &app.pf_dev);
 	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to open required DOCA device(s): %s\n",
-			doca_error_get_descr(result));
+		fprintf(stderr, "Failed to open PF device: %s\n", doca_error_get_descr(result));
 		dump_doca_devices();
 		return 1;
 	}
 
-	result = doca_pe_create(&app.sta_pe);
+	result = open_local_dev(&sf_selector, &app.sf_dev);
 	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to create STA DOCA PE: %s\n", doca_error_get_descr(result));
+		fprintf(stderr, "Failed to open SF device: %s\n", doca_error_get_descr(result));
 		cleanup(&app);
+		dump_doca_devices();
 		return 1;
 	}
 
-	result = doca_pe_create(&app.sta_io_pe);
+	dump_devinfo("pf_dev", app.pf_dev);
+	dump_devinfo("sf_dev", app.sf_dev);
+
+	result = doca_pe_create(&app.main_pe);
 	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to create STA IO DOCA PE: %s\n", doca_error_get_descr(result));
+		fprintf(stderr, "doca_pe_create failed: %s\n", doca_error_get_descr(result));
 		cleanup(&app);
 		return 1;
 	}
 
-	result = doca_sta_create(app.ctrl_dev, &app.sta);
+	result = doca_sta_create(app.pf_dev, &app.sta);
 	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to create DOCA STA context: %s\n", doca_error_get_descr(result));
+		fprintf(stderr, "doca_sta_create failed: %s\n", doca_error_get_descr(result));
 		cleanup(&app);
 		return 1;
 	}
 
-	result = doca_sta_add_dev(app.sta, app.net_dev);
+	result = doca_sta_add_dev(app.sta, app.sf_dev);
 	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to add DOCA device to STA context: %s\n", doca_error_get_descr(result));
+		fprintf(stderr, "doca_sta_add_dev failed: %s\n", doca_error_get_descr(result));
 		cleanup(&app);
 		return 1;
 	}
 
-	result = doca_sta_set_max_sta_io(app.sta, 1);
+	app.main_ctx = doca_sta_as_ctx(app.sta);
+	if (app.main_ctx == NULL) {
+		fprintf(stderr, "doca_sta_as_ctx returned null\n");
+		cleanup(&app);
+		return 1;
+	}
+
+	result = doca_ctx_set_user_data(app.main_ctx, (union doca_data){ .ptr = "main_sta" });
 	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to set max STA IO contexts: %s\n", doca_error_get_descr(result));
+		fprintf(stderr, "doca_ctx_set_user_data failed: %s\n", doca_error_get_descr(result));
 		cleanup(&app);
 		return 1;
 	}
 
-	result = doca_ctx_set_user_data(doca_sta_as_ctx(app.sta), (union doca_data){ .ptr = "sta" });
+	result = doca_ctx_set_state_changed_cb(app.main_ctx, ctx_state_changed_cb);
 	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to set STA ctx user data: %s\n", doca_error_get_descr(result));
+		fprintf(stderr, "doca_ctx_set_state_changed_cb failed: %s\n", doca_error_get_descr(result));
 		cleanup(&app);
 		return 1;
 	}
 
-	result = doca_pe_connect_ctx(app.sta_pe, doca_sta_as_ctx(app.sta));
+	dump_ctx_state("main_ctx(before connect)", app.main_ctx);
+
+	result = doca_pe_connect_ctx(app.main_pe, app.main_ctx);
 	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to connect STA ctx to PE: %s\n", doca_error_get_descr(result));
+		fprintf(stderr, "doca_pe_connect_ctx failed: %s\n", doca_error_get_descr(result));
 		cleanup(&app);
 		return 1;
 	}
 
-	result = doca_ctx_set_state_changed_cb(doca_sta_as_ctx(app.sta), ctx_state_changed_cb);
+	dump_ctx_state("main_ctx(after connect)", app.main_ctx);
+
+	result = doca_ctx_start(app.main_ctx);
 	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to set STA state callback: %s\n", doca_error_get_descr(result));
+		fprintf(stderr, "doca_ctx_start failed immediately: %s\n", doca_error_get_descr(result));
+		dump_ctx_state("main_ctx(after failed start)", app.main_ctx);
+		progress_ctx_for_debug(app.main_pe, app.main_ctx, "main_ctx(post-fail)", 500);
 		cleanup(&app);
 		return 1;
 	}
 
-	result = doca_ctx_start(doca_sta_as_ctx(app.sta));
-	if (result != DOCA_SUCCESS && result != DOCA_ERROR_IN_PROGRESS) {
-		fprintf(stderr, "Failed to start STA ctx: %s\n", doca_error_get_descr(result));
-		cleanup(&app);
-		return 1;
-	}
+	dump_ctx_state("main_ctx(after start call)", app.main_ctx);
+	progress_ctx_for_debug(app.main_pe, app.main_ctx, "main_ctx(post-start)", 1000);
 
-	result = wait_for_running(&app);
-	if (result != DOCA_SUCCESS || !app.sta_running) {
-		fprintf(stderr, "STA main context did not reach RUNNING state: %s\n", doca_error_get_descr(result));
-		cleanup(&app);
-		return 1;
-	}
-
-	result = doca_sta_io_create(app.sta, &app.sta_io);
+	result = wait_until_running(app.main_pe, app.main_ctx, "main_ctx");
 	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to create DOCA STA IO context: %s\n", doca_error_get_descr(result));
+		fprintf(stderr, "main ctx did not reach RUNNING: %s\n", doca_error_get_descr(result));
 		cleanup(&app);
 		return 1;
 	}
 
-	result = doca_ctx_set_user_data(doca_sta_io_as_ctx(app.sta_io), (union doca_data){ .ptr = "sta_io" });
-	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to set STA IO ctx user data: %s\n", doca_error_get_descr(result));
-		cleanup(&app);
-		return 1;
-	}
-
-	result = doca_ctx_set_state_changed_cb(doca_sta_io_as_ctx(app.sta_io), ctx_state_changed_cb);
-	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to set STA IO state callback: %s\n", doca_error_get_descr(result));
-		cleanup(&app);
-		return 1;
-	}
-
-	result = doca_pe_connect_ctx(app.sta_io_pe, doca_sta_io_as_ctx(app.sta_io));
-	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to connect STA IO ctx to PE: %s\n", doca_error_get_descr(result));
-		cleanup(&app);
-		return 1;
-	}
-
-	result = doca_ctx_start(doca_sta_io_as_ctx(app.sta_io));
-	if (result != DOCA_SUCCESS && result != DOCA_ERROR_IN_PROGRESS) {
-		fprintf(stderr, "Failed to start STA IO ctx: %s\n", doca_error_get_descr(result));
-		cleanup(&app);
-		return 1;
-	}
-
-	result = wait_for_running(&app);
-	if (result != DOCA_SUCCESS || !app.sta_io_running) {
-		fprintf(stderr, "STA IO context did not reach RUNNING state: %s\n", doca_error_get_descr(result));
-		cleanup(&app);
-		return 1;
-	}
-
-	printf("STA host-side control and IO contexts are running.\n");
-	printf("Next step: add remote subsystem / namespace / QP setup for RDMA path validation.\n");
-
+	printf("[OK] main STA context is RUNNING\n");
 	cleanup(&app);
 	return 0;
 }
