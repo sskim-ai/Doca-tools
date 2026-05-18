@@ -8,6 +8,8 @@ spdk_inc_dir = spdk_root / 'include'
 spdk_internal_inc_dir = spdk_root / 'lib' / 'nvme'
 spdk_pkgconfig_dir = get_option('spdk_pkgconfig_dir')
 spdk_dpdk_lib_dir = get_option('spdk_dpdk_lib_dir')
+spdk_dpdk_tmp_lib_dir = get_option('spdk_dpdk_tmp_lib_dir')
+mellanox_dpdk_lib_dir = get_option('mellanox_dpdk_lib_dir')
 
 doca_common = cc.find_library('doca_common', dirs : doca_lib_dir, required : true)
 openssl_ssl = cc.find_library('ssl', required : true)
@@ -74,6 +76,9 @@ if runtime_rpath == ''
 else
   runtime_rpath += ':' + spdk_dpdk_lib_dir
 endif
+
+runtime_rpath += ':' + spdk_dpdk_tmp_lib_dir
+runtime_rpath += ':' + mellanox_dpdk_lib_dir
 
 executable(
   'doca-sta-tool',

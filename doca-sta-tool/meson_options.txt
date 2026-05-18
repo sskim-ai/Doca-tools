@@ -18,3 +18,17 @@ option(
   value : '/home/skhynix/spdk/dpdk/build/lib',
   description : 'Directory containing DPDK shared libraries used by SPDK',
 )
+
+option(
+  'spdk_dpdk_tmp_lib_dir',
+  type : 'string',
+  value : '/home/skhynix/spdk/dpdk/build-tmp/lib',
+  description : 'Fallback DPDK build directory used by SPDK',
+)
+
+option(
+  'mellanox_dpdk_lib_dir',
+  type : 'string',
+  value : '/opt/mellanox/dpdk/lib/x86_64-linux-gnu',
+  description : 'Mellanox DPDK shared library directory',
+)
