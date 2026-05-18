@@ -82,14 +82,22 @@ real MMIO write
 
 `meson.build` 는 사내 SPDK 환경에서 조정 가능한 시작점이다. 실제 환경에 따라 SPDK include/lib 경로나 정적 링크 옵션이 추가로 필요할 수 있다.
 
-## 7. 알려진 한계
+## 7. 실행
+
+기본 BDF는 `0000:3b:00.0` 이지만, 실행 시 첫 번째 인자로 대상 NVMe BDF를 넘길 수 있다.
+
+```bash
+./build/doca-sta-tool 0000:xx:yy.z
+```
+
+## 8. 알려진 한계
 
 - SPDK public API가 아니라 internal header에 의존하므로 SPDK 버전에 취약하다.
-- BDF 값은 현재 `0000:3b:00.0` 으로 하드코딩되어 있다.
+- 기본 BDF 값은 `0000:3b:00.0` 이지만, 실제 검증 시에는 실행 인자로 변경해야 할 수 있다.
 - doorbell polling은 현재 fallback일 뿐, 최종 구조가 아니다.
 - 현재 PoC는 STA 데이터패스 전체를 완성한 것이 아니라, host-side queue export 경로를 검증하기 위한 기반 코드다.
 
-## 8. 장기 목표
+## 9. 장기 목표
 
 - VFIO dma-buf 기반 BAR export
 - `doca_mmap_set_dmabuf_memrange()` 또는 동등한 안전한 메커니즘 활용

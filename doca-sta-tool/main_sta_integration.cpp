@@ -44,7 +44,7 @@ int configure_mmap(struct doca_mmap **mmap, void *addr, size_t len, const char *
 
 } // namespace
 
-int main()
+int main(int argc, char **argv)
 {
     struct spdk_doca_queue_resources qres = {};
     void *backend = nullptr;
@@ -52,15 +52,19 @@ int main()
     struct doca_mmap *mmap_cq = nullptr;
     struct doca_mmap *mmap_db = nullptr;
     volatile int stop_requested = 0;
+    const char *bdf = "0000:3b:00.0";
     int rc = 1;
+
+    if (argc > 1)
+        bdf = argv[1];
 
     if (spdk_backend_init_env("sta_host", -1) != 0) {
         std::fprintf(stderr, "Failed to initialize SPDK environment\n");
         return 1;
     }
 
-    if (spdk_backend_qpair_export("0000:3b:00.0", &qres, &backend) != 0) {
-        std::fprintf(stderr, "Failed to export SPDK qpair resources\n");
+    if (spdk_backend_qpair_export(bdf, &qres, &backend) != 0) {
+        std::fprintf(stderr, "Failed to export SPDK qpair resources for BDF %s\n", bdf);
         return 1;
     }
 
