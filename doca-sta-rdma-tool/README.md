@@ -34,16 +34,20 @@ meson compile -C build
 
 ## Run
 
-Without arguments, the tool selects the first DOCA device that reports STA capability.
+Without arguments, the tool uses these defaults:
+
+- control device: `ens5008f0np0`
+- network device: `endaf0pf0sf88`
 
 ```bash
 ./build/doca-sta-rdma-tool
 ```
 
-To force a specific host-visible DOCA device by PCI address:
+To override the control and network devices, pass interface names or PCI BDFs:
 
 ```bash
-./build/doca-sta-rdma-tool 0000:xx:yy.z
+./build/doca-sta-rdma-tool ens5008f0np0 endaf0pf0sf88
+./build/doca-sta-rdma-tool 0000:da:00.0 endaf0pf0sf88
 ```
 
 ## Current Scope

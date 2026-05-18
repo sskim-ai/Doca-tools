@@ -21,6 +21,17 @@ struct app_state {
 	bool sta_io_running;
 };
 
+enum selector_type {
+	SELECTOR_ANY = 0,
+	SELECTOR_PCI,
+	SELECTOR_IFACE,
+};
+
+struct device_selector {
+	enum selector_type type;
+	const char *value;
+};
+
 static void
 ctx_state_changed_cb(const union doca_data user_data,
 		     struct doca_ctx *ctx,
@@ -65,7 +76,9 @@ wait_for_running(struct app_state *app)
 }
 
 static doca_error_t
-open_sta_capable_device(const char *requested_pci, struct doca_dev **dev)
+open_doca_device(const struct device_selector *selector,
+		 bool require_sta_cap,
+		 struct doca_dev **dev)
 {
 	struct doca_devinfo **dev_list = NULL;
 	uint32_t nb_devs = 0;
@@ -77,29 +90,94 @@ open_sta_capable_device(const char *requested_pci, struct doca_dev **dev)
 
 	for (uint32_t i = 0; i < nb_devs; ++i) {
 		char pci_addr[32] = {0};
-		bool pci_match;
+		char iface_name[64] = {0};
+		bool selector_match = false;
 
 		result = doca_devinfo_get_pci_addr_str(dev_list[i], pci_addr);
-		if (result != DOCA_SUCCESS)
+		if (selector == NULL || selector->type == SELECTOR_ANY) {
+			selector_match = true;
+		} else if (selector->type == SELECTOR_PCI) {
+			selector_match = (result == DOCA_SUCCESS) && (strcmp(selector->value, pci_addr) == 0);
+		} else if (selector->type == SELECTOR_IFACE) {
+			result = doca_devinfo_get_iface_name(dev_list[i], iface_name, sizeof(iface_name));
+			selector_match = (result == DOCA_SUCCESS) && (strcmp(selector->value, iface_name) == 0);
+		}
+
+		if (!selector_match)
 			continue;
 
-		pci_match = (requested_pci == NULL) || (strcmp(requested_pci, pci_addr) == 0);
-		if (!pci_match)
-			continue;
+		if (require_sta_cap) {
+			result = doca_sta_cap_is_supported(dev_list[i]);
+			if (result != DOCA_SUCCESS)
+				continue;
+		}
 
-		result = doca_sta_cap_is_supported(dev_list[i]);
-		if (result != DOCA_SUCCESS)
-			continue;
+		if (iface_name[0] == '\0')
+			(void)doca_devinfo_get_iface_name(dev_list[i], iface_name, sizeof(iface_name));
 
 		result = doca_dev_open(dev_list[i], dev);
+		if (result == DOCA_SUCCESS) {
+			printf("Selected DOCA device: pci=%s iface=%s\n",
+			       pci_addr[0] != '\0' ? pci_addr : "unknown",
+			       iface_name[0] != '\0' ? iface_name : "unknown");
+		}
 		(void)doca_devinfo_destroy_list(dev_list);
-		if (result == DOCA_SUCCESS)
-			printf("Selected DOCA device: %s\n", pci_addr);
 		return result;
 	}
 
 	(void)doca_devinfo_destroy_list(dev_list);
 	return DOCA_ERROR_NOT_FOUND;
+}
+
+static struct device_selector
+parse_selector(const char *value)
+{
+	struct device_selector selector = {
+		.type = SELECTOR_ANY,
+		.value = NULL,
+	};
+
+	if (value == NULL)
+		return selector;
+
+	if (strchr(value, ':') != NULL) {
+		selector.type = SELECTOR_PCI;
+		selector.value = value;
+		return selector;
+	}
+
+	selector.type = SELECTOR_IFACE;
+	selector.value = value;
+	return selector;
+}
+
+static doca_error_t
+open_sta_devices(const struct device_selector *ctrl_selector,
+		 const struct device_selector *net_selector,
+		 struct app_state *app)
+{
+	doca_error_t result;
+
+	result = open_doca_device(ctrl_selector, true, &app->ctrl_dev);
+	if (result != DOCA_SUCCESS)
+		return result;
+
+	result = open_doca_device(net_selector, false, &app->net_dev);
+	if (result != DOCA_SUCCESS)
+		return result;
+
+	return DOCA_SUCCESS;
+}
+
+static void
+print_usage(const char *argv0)
+{
+	fprintf(stderr,
+		"Usage: %s [control-pci-or-iface] [network-pci-or-iface]\n"
+		"Examples:\n"
+		"  %s ens5008f0np0 endaf0pf0sf88\n"
+		"  %s 0000:da:00.0 endaf0pf0sf88\n",
+		argv0, argv0, argv0);
 }
 
 static void
@@ -131,25 +209,27 @@ cleanup(struct app_state *app)
 int
 main(int argc, char **argv)
 {
-	const char *requested_pci = NULL;
+	struct device_selector ctrl_selector = { .type = SELECTOR_IFACE, .value = "ens5008f0np0" };
+	struct device_selector net_selector = { .type = SELECTOR_IFACE, .value = "endaf0pf0sf88" };
 	struct app_state app = {0};
 	doca_error_t result;
 
-	if (argc > 2) {
-		fprintf(stderr, "Usage: %s [host-visible-doca-pci-bdf]\n", argv[0]);
+	if (argc > 3) {
+		print_usage(argv[0]);
 		return 1;
 	}
 
-	if (argc == 2)
-		requested_pci = argv[1];
+	if (argc >= 2)
+		ctrl_selector = parse_selector(argv[1]);
+	if (argc == 3)
+		net_selector = parse_selector(argv[2]);
 
-	result = open_sta_capable_device(requested_pci, &app.ctrl_dev);
+	result = open_sta_devices(&ctrl_selector, &net_selector, &app);
 	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to open STA-capable DOCA device: %s\n",
+		fprintf(stderr, "Failed to open required DOCA device(s): %s\n",
 			doca_error_get_descr(result));
 		return 1;
 	}
-	app.net_dev = app.ctrl_dev;
 
 	result = doca_pe_create(&app.sta_pe);
 	if (result != DOCA_SUCCESS) {
