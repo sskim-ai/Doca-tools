@@ -11,3 +11,10 @@ option(
   value : '/home/skhynix/spdk/build/lib/pkgconfig',
   description : 'Directory containing SPDK pkg-config files',
 )
+
+option(
+  'spdk_dpdk_lib_dir',
+  type : 'string',
+  value : '/home/skhynix/spdk/dpdk/build/lib',
+  description : 'Directory containing DPDK shared libraries used by SPDK',
+)

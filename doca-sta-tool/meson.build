@@ -7,6 +7,7 @@ spdk_root = get_option('spdk_root')
 spdk_inc_dir = spdk_root / 'include'
 spdk_internal_inc_dir = spdk_root / 'lib' / 'nvme'
 spdk_pkgconfig_dir = get_option('spdk_pkgconfig_dir')
+spdk_dpdk_lib_dir = get_option('spdk_dpdk_lib_dir')
 
 doca_common = cc.find_library('doca_common', dirs : doca_lib_dir, required : true)
 openssl_ssl = cc.find_library('ssl', required : true)
@@ -66,6 +67,12 @@ if runtime_lib_dirs.length() > 0
   if runtime_lib_dirs.length() > 4
     runtime_rpath += ':' + runtime_lib_dirs[4]
   endif
+endif
+
+if runtime_rpath == ''
+  runtime_rpath = spdk_dpdk_lib_dir
+else
+  runtime_rpath += ':' + spdk_dpdk_lib_dir
 endif
 
 executable(
