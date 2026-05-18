@@ -26,13 +26,14 @@ int spdk_backend_init_env(const char *app_name, int shm_id)
         return 0;
 
     spdk_env_opts_init(&opts);
+    opts.opts_size = sizeof(opts);
     opts.name = app_name;
     opts.shm_id = shm_id;
     /*
-     * In containerized or restricted environments physical addresses may not
-     * be available, so force DPDK to use virtual-address IOVA mode.
+     * This tool always probes an explicit PCIe traddr instead of scanning all
+     * PCI devices, so match spdk_nvme_identify's no_pci flow as closely as possible.
      */
-    opts.iova_mode = "va";
+    opts.no_pci = true;
 
     if (spdk_env_init(&opts) < 0)
         return -1;
