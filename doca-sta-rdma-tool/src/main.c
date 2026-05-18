@@ -11,8 +11,10 @@
 #include <doca_sta_io.h>
 
 struct app_state {
-	struct doca_pe *pe;
-	struct doca_dev *dev;
+	struct doca_pe *sta_pe;
+	struct doca_pe *sta_io_pe;
+	struct doca_dev *ctrl_dev;
+	struct doca_dev *net_dev;
 	struct doca_sta *sta;
 	struct doca_sta_io *sta_io;
 	bool sta_running;
@@ -53,7 +55,10 @@ wait_for_running(struct app_state *app)
 		if (app->sta_running && app->sta_io_running)
 			return DOCA_SUCCESS;
 
-		(void)doca_pe_progress(app->pe);
+		if (app->sta_pe != NULL)
+			(void)doca_pe_progress(app->sta_pe);
+		if (app->sta_io_pe != NULL)
+			(void)doca_pe_progress(app->sta_io_pe);
 	}
 
 	return DOCA_ERROR_TIME_OUT;
@@ -110,11 +115,17 @@ cleanup(struct app_state *app)
 		(void)doca_sta_destroy(app->sta);
 	}
 
-	if (app->pe != NULL)
-		(void)doca_pe_destroy(app->pe);
+	if (app->sta_io_pe != NULL)
+		(void)doca_pe_destroy(app->sta_io_pe);
 
-	if (app->dev != NULL)
-		(void)doca_dev_close(app->dev);
+	if (app->sta_pe != NULL)
+		(void)doca_pe_destroy(app->sta_pe);
+
+	if (app->net_dev != NULL && app->net_dev != app->ctrl_dev)
+		(void)doca_dev_close(app->net_dev);
+
+	if (app->ctrl_dev != NULL)
+		(void)doca_dev_close(app->ctrl_dev);
 }
 
 int
@@ -132,28 +143,36 @@ main(int argc, char **argv)
 	if (argc == 2)
 		requested_pci = argv[1];
 
-	result = open_sta_capable_device(requested_pci, &app.dev);
+	result = open_sta_capable_device(requested_pci, &app.ctrl_dev);
 	if (result != DOCA_SUCCESS) {
 		fprintf(stderr, "Failed to open STA-capable DOCA device: %s\n",
 			doca_error_get_descr(result));
 		return 1;
 	}
+	app.net_dev = app.ctrl_dev;
 
-	result = doca_pe_create(&app.pe);
+	result = doca_pe_create(&app.sta_pe);
 	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to create DOCA PE: %s\n", doca_error_get_descr(result));
+		fprintf(stderr, "Failed to create STA DOCA PE: %s\n", doca_error_get_descr(result));
 		cleanup(&app);
 		return 1;
 	}
 
-	result = doca_sta_create(app.dev, &app.sta);
+	result = doca_pe_create(&app.sta_io_pe);
+	if (result != DOCA_SUCCESS) {
+		fprintf(stderr, "Failed to create STA IO DOCA PE: %s\n", doca_error_get_descr(result));
+		cleanup(&app);
+		return 1;
+	}
+
+	result = doca_sta_create(app.ctrl_dev, &app.sta);
 	if (result != DOCA_SUCCESS) {
 		fprintf(stderr, "Failed to create DOCA STA context: %s\n", doca_error_get_descr(result));
 		cleanup(&app);
 		return 1;
 	}
 
-	result = doca_sta_add_dev(app.sta, app.dev);
+	result = doca_sta_add_dev(app.sta, app.net_dev);
 	if (result != DOCA_SUCCESS) {
 		fprintf(stderr, "Failed to add DOCA device to STA context: %s\n", doca_error_get_descr(result));
 		cleanup(&app);
@@ -167,13 +186,6 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	result = doca_sta_io_create(app.sta, &app.sta_io);
-	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to create DOCA STA IO context: %s\n", doca_error_get_descr(result));
-		cleanup(&app);
-		return 1;
-	}
-
 	result = doca_ctx_set_user_data(doca_sta_as_ctx(app.sta), (union doca_data){ .ptr = "sta" });
 	if (result != DOCA_SUCCESS) {
 		fprintf(stderr, "Failed to set STA ctx user data: %s\n", doca_error_get_descr(result));
@@ -181,9 +193,9 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	result = doca_ctx_set_user_data(doca_sta_io_as_ctx(app.sta_io), (union doca_data){ .ptr = "sta_io" });
+	result = doca_pe_connect_ctx(app.sta_pe, doca_sta_as_ctx(app.sta));
 	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to set STA IO ctx user data: %s\n", doca_error_get_descr(result));
+		fprintf(stderr, "Failed to connect STA ctx to PE: %s\n", doca_error_get_descr(result));
 		cleanup(&app);
 		return 1;
 	}
@@ -195,6 +207,34 @@ main(int argc, char **argv)
 		return 1;
 	}
 
+	result = doca_ctx_start(doca_sta_as_ctx(app.sta));
+	if (result != DOCA_SUCCESS && result != DOCA_ERROR_IN_PROGRESS) {
+		fprintf(stderr, "Failed to start STA ctx: %s\n", doca_error_get_descr(result));
+		cleanup(&app);
+		return 1;
+	}
+
+	result = wait_for_running(&app);
+	if (result != DOCA_SUCCESS || !app.sta_running) {
+		fprintf(stderr, "STA main context did not reach RUNNING state: %s\n", doca_error_get_descr(result));
+		cleanup(&app);
+		return 1;
+	}
+
+	result = doca_sta_io_create(app.sta, &app.sta_io);
+	if (result != DOCA_SUCCESS) {
+		fprintf(stderr, "Failed to create DOCA STA IO context: %s\n", doca_error_get_descr(result));
+		cleanup(&app);
+		return 1;
+	}
+
+	result = doca_ctx_set_user_data(doca_sta_io_as_ctx(app.sta_io), (union doca_data){ .ptr = "sta_io" });
+	if (result != DOCA_SUCCESS) {
+		fprintf(stderr, "Failed to set STA IO ctx user data: %s\n", doca_error_get_descr(result));
+		cleanup(&app);
+		return 1;
+	}
+
 	result = doca_ctx_set_state_changed_cb(doca_sta_io_as_ctx(app.sta_io), ctx_state_changed_cb);
 	if (result != DOCA_SUCCESS) {
 		fprintf(stderr, "Failed to set STA IO state callback: %s\n", doca_error_get_descr(result));
@@ -202,23 +242,9 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	result = doca_pe_connect_ctx(app.pe, doca_sta_as_ctx(app.sta));
-	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to connect STA ctx to PE: %s\n", doca_error_get_descr(result));
-		cleanup(&app);
-		return 1;
-	}
-
-	result = doca_pe_connect_ctx(app.pe, doca_sta_io_as_ctx(app.sta_io));
+	result = doca_pe_connect_ctx(app.sta_io_pe, doca_sta_io_as_ctx(app.sta_io));
 	if (result != DOCA_SUCCESS) {
 		fprintf(stderr, "Failed to connect STA IO ctx to PE: %s\n", doca_error_get_descr(result));
-		cleanup(&app);
-		return 1;
-	}
-
-	result = doca_ctx_start(doca_sta_as_ctx(app.sta));
-	if (result != DOCA_SUCCESS && result != DOCA_ERROR_IN_PROGRESS) {
-		fprintf(stderr, "Failed to start STA ctx: %s\n", doca_error_get_descr(result));
 		cleanup(&app);
 		return 1;
 	}
@@ -231,8 +257,8 @@ main(int argc, char **argv)
 	}
 
 	result = wait_for_running(&app);
-	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "STA contexts did not reach RUNNING state: %s\n", doca_error_get_descr(result));
+	if (result != DOCA_SUCCESS || !app.sta_io_running) {
+		fprintf(stderr, "STA IO context did not reach RUNNING state: %s\n", doca_error_get_descr(result));
 		cleanup(&app);
 		return 1;
 	}
