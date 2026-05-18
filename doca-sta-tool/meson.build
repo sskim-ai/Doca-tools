@@ -3,7 +3,7 @@ project('doca-sta-tool', ['c', 'cpp'], version : '0.1.0', default_options : ['wa
 cc = meson.get_compiler('c')
 doca_inc = include_directories('/opt/mellanox/doca/include')
 doca_lib_dir = '/opt/mellanox/doca/lib/' + host_machine.cpu_family() + '-linux-gnu'
-spdk_root = meson.get_env('SPDK_ROOT', '/home/skhynix/spdk')
+spdk_root = get_option('spdk_root')
 spdk_inc_dir = spdk_root / 'include'
 spdk_internal_inc_dir = spdk_root / 'lib' / 'nvme'
 spdk_lib_dir = spdk_root / 'build' / 'lib'

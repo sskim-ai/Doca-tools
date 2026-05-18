@@ -1,0 +1,6 @@
+option(
+  'spdk_root',
+  type : 'string',
+  value : '/home/skhynix/spdk',
+  description : 'Root directory of the SPDK source/build tree',
+)
