@@ -73,23 +73,24 @@ int spdk_backend_qpair_export(
     void **backend_ctx)
 {
     struct spdk_nvme_transport_id trid;
+    char trid_str[SPDK_NVMF_TRADDR_MAX_LEN + 32];
     struct probe_ctx pctx = {0};
     struct spdk_nvme_ctrlr *ctrlr;
     struct spdk_nvme_io_qpair_opts qopts;
     struct spdk_nvme_qpair *qpair;
 
     memset(&trid, 0, sizeof(trid));
-
-    trid.trtype = SPDK_NVME_TRANSPORT_PCIE;
-    snprintf(trid.traddr, sizeof(trid.traddr), "%s", bdf);
+    snprintf(trid_str, sizeof(trid_str), "trtype:PCIe traddr:%s", bdf);
+    if (spdk_nvme_transport_id_parse(&trid, trid_str) != 0)
+        return -1;
 
     pctx.bdf = bdf;
 
     if (spdk_nvme_probe(&trid, &pctx, probe_cb, attach_cb, NULL) != 0)
-        return -1;
+        return -2;
 
     if (!pctx.ctrlr)
-        return -2;
+        return -3;
 
     ctrlr = pctx.ctrlr;
 
@@ -97,11 +98,11 @@ int spdk_backend_qpair_export(
 
     qpair = spdk_nvme_ctrlr_alloc_io_qpair(ctrlr, &qopts, sizeof(qopts));
     if (!qpair)
-        return -3;
+        return -4;
 
     if (spdk_nvme_qpair_export_doca_resources(qpair, qopts.io_queue_size, out) != 0) {
         spdk_nvme_ctrlr_free_io_qpair(qpair);
-        return -4;
+        return -5;
     }
 
     struct backend_ctx *ctx = calloc(1, sizeof(*ctx));
@@ -109,7 +110,7 @@ int spdk_backend_qpair_export(
         if (out->dummy_db_page_addr)
             spdk_free(out->dummy_db_page_addr);
         spdk_nvme_ctrlr_free_io_qpair(qpair);
-        return -5;
+        return -6;
     }
 
     ctx->ctrlr = ctrlr;
