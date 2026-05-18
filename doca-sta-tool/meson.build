@@ -53,7 +53,10 @@ foreach arg : spdk_link_args
 endforeach
 
 if runtime_lib_dirs.length() > 0
-  runtime_rpath = runtime_lib_dirs.join(':')
+  runtime_rpath = runtime_lib_dirs[0]
+  foreach dir : runtime_lib_dirs[1:]
+    runtime_rpath += ':' + dir
+  endforeach
 endif
 
 executable(
