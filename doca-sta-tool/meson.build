@@ -92,7 +92,7 @@ executable(
   dependencies : [doca_common, openssl_ssl, openssl_crypto, libuuid],
   c_args : spdk_cflags,
   cpp_args : ['-pthread'] + spdk_cflags,
-  link_args : ['-pthread'] + spdk_link_args,
+  link_args : ['-pthread', '-Wl,--disable-new-dtags', '-Wl,-rpath,' + runtime_rpath] + spdk_link_args,
   build_rpath : runtime_rpath,
   install_rpath : runtime_rpath,
   install : false,
