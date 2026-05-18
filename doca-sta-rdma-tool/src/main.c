@@ -25,6 +25,7 @@ enum selector_type {
 	SELECTOR_ANY = 0,
 	SELECTOR_PCI,
 	SELECTOR_IFACE,
+	SELECTOR_IBDEV,
 };
 
 struct device_selector {
@@ -49,17 +50,21 @@ dump_doca_devices(void)
 	for (uint32_t i = 0; i < nb_devs; ++i) {
 		char pci_addr[32] = {0};
 		char iface_name[64] = {0};
+		char ibdev_name[64] = {0};
 		doca_error_t pci_result;
 		doca_error_t iface_result;
+		doca_error_t ibdev_result;
 		doca_error_t sta_result;
 
 		pci_result = doca_devinfo_get_pci_addr_str(dev_list[i], pci_addr);
 		iface_result = doca_devinfo_get_iface_name(dev_list[i], iface_name, sizeof(iface_name));
+		ibdev_result = doca_devinfo_get_ibdev_name(dev_list[i], ibdev_name, sizeof(ibdev_name));
 		sta_result = doca_sta_cap_is_supported(dev_list[i]);
 
-		printf("  - pci=%s iface=%s sta_cap=%s\n",
+		printf("  - pci=%s iface=%s ibdev=%s sta_cap=%s\n",
 		       pci_result == DOCA_SUCCESS ? pci_addr : "n/a",
 		       iface_result == DOCA_SUCCESS ? iface_name : "n/a",
+		       ibdev_result == DOCA_SUCCESS ? ibdev_name : "n/a",
 		       sta_result == DOCA_SUCCESS ? "yes" : "no");
 	}
 
@@ -125,6 +130,7 @@ open_doca_device(const struct device_selector *selector,
 	for (uint32_t i = 0; i < nb_devs; ++i) {
 		char pci_addr[32] = {0};
 		char iface_name[64] = {0};
+		char ibdev_name[64] = {0};
 		bool selector_match = false;
 
 		result = doca_devinfo_get_pci_addr_str(dev_list[i], pci_addr);
@@ -135,6 +141,9 @@ open_doca_device(const struct device_selector *selector,
 		} else if (selector->type == SELECTOR_IFACE) {
 			result = doca_devinfo_get_iface_name(dev_list[i], iface_name, sizeof(iface_name));
 			selector_match = (result == DOCA_SUCCESS) && (strcmp(selector->value, iface_name) == 0);
+		} else if (selector->type == SELECTOR_IBDEV) {
+			result = doca_devinfo_get_ibdev_name(dev_list[i], ibdev_name, sizeof(ibdev_name));
+			selector_match = (result == DOCA_SUCCESS) && (strcmp(selector->value, ibdev_name) == 0);
 		}
 
 		if (!selector_match)
@@ -148,12 +157,15 @@ open_doca_device(const struct device_selector *selector,
 
 		if (iface_name[0] == '\0')
 			(void)doca_devinfo_get_iface_name(dev_list[i], iface_name, sizeof(iface_name));
+		if (ibdev_name[0] == '\0')
+			(void)doca_devinfo_get_ibdev_name(dev_list[i], ibdev_name, sizeof(ibdev_name));
 
 		result = doca_dev_open(dev_list[i], dev);
 		if (result == DOCA_SUCCESS) {
-			printf("Selected DOCA device: pci=%s iface=%s\n",
+			printf("Selected DOCA device: pci=%s iface=%s ibdev=%s\n",
 			       pci_addr[0] != '\0' ? pci_addr : "unknown",
-			       iface_name[0] != '\0' ? iface_name : "unknown");
+			       iface_name[0] != '\0' ? iface_name : "unknown",
+			       ibdev_name[0] != '\0' ? ibdev_name : "unknown");
 		}
 		(void)doca_devinfo_destroy_list(dev_list);
 		return result;
@@ -176,6 +188,12 @@ parse_selector(const char *value)
 
 	if (strchr(value, ':') != NULL) {
 		selector.type = SELECTOR_PCI;
+		selector.value = value;
+		return selector;
+	}
+
+	if (strncmp(value, "mlx5_", 5) == 0) {
+		selector.type = SELECTOR_IBDEV;
 		selector.value = value;
 		return selector;
 	}
@@ -211,8 +229,9 @@ print_usage(const char *argv0)
 		"       %s --list\n"
 		"Examples:\n"
 		"  %s ens5008f0np0 endaf0pf0sf88\n"
-		"  %s 0000:da:00.0 endaf0pf0sf88\n",
-		argv0, argv0, argv0, argv0);
+		"  %s 0000:da:00.0 endaf0pf0sf88\n"
+		"  %s mlx5_3 mlx5_2\n",
+		argv0, argv0, argv0, argv0, argv0);
 }
 
 static void

@@ -43,11 +43,12 @@ Without arguments, the tool uses these defaults:
 ./build/doca-sta-rdma-tool
 ```
 
-To override the control and network devices, pass interface names or PCI BDFs:
+To override the control and network devices, pass interface names, PCI BDFs, or IB device names:
 
 ```bash
 ./build/doca-sta-rdma-tool ens5008f0np0 endaf0pf0sf88
 ./build/doca-sta-rdma-tool 0000:da:00.0 endaf0pf0sf88
+./build/doca-sta-rdma-tool mlx5_3 mlx5_2
 ```
 
 ## Current Scope
