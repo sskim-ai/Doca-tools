@@ -16,6 +16,7 @@
 #include <doca_pe.h>
 #include <doca_sta.h>
 #include <doca_sta_be.h>
+#include <doca_sta_io.h>
 #include <doca_sta_event.h>
 #include <doca_sta_mem.h>
 #include <doca_sta_subsystem.h>
@@ -27,6 +28,7 @@ struct config {
 	uint16_t max_sta_io;
 	uint32_t hold_seconds;
 	bool skip_add_dev;
+	bool start_io;
 };
 
 struct app_state {
@@ -34,7 +36,9 @@ struct app_state {
 	struct doca_dev *pf_dev;
 	struct doca_dev *sf_dev;
 	struct doca_sta *sta;
+	struct doca_sta_io *sta_io;
 	struct doca_ctx *main_ctx;
+	struct doca_ctx *io_ctx;
 	struct doca_pe *main_pe;
 	struct doca_log_backend *sdk_log_backend;
 };
@@ -292,6 +296,21 @@ on_sta_cqe_notify(const struct doca_sta_event_cqe_notify *event, union doca_data
 	printf("[CB] STA CQE notify event\n");
 }
 
+static void
+on_sta_io_transport_err(const struct doca_sta_event_transport_err *event, union doca_data user_data)
+{
+	uint32_t syndrome = 0;
+	uint32_t vendor_syndrome = 0;
+	uint32_t operation = 0;
+
+	(void)user_data;
+	(void)doca_sta_event_transport_err_get_operation(event, &operation);
+	(void)doca_sta_event_transport_err_get_syndrome(event, &syndrome);
+	(void)doca_sta_event_transport_err_get_vendor_syndrome(event, &vendor_syndrome);
+	printf("[CB] STA IO transport error operation=%u syndrome=0x%x vendor_syndrome=0x%x\n",
+	       operation, syndrome, vendor_syndrome);
+}
+
 
 static void
 on_sta_task_complete(struct doca_sta_producer_task_send *task, union doca_data task_user_data)
@@ -321,6 +340,19 @@ register_sta_task_confs(struct doca_sta *sta)
 	return doca_sta_be_task_destroy_queue_set_conf(sta, on_sta_task_complete, on_sta_task_error);
 }
 
+
+static doca_error_t
+register_sta_io_confs(struct doca_sta_io *sta_io)
+{
+	union doca_data user_data = {0};
+	doca_error_t result;
+
+	result = doca_sta_io_task_disconnect_set_conf(sta_io, on_sta_task_complete, on_sta_task_error);
+	if (result != DOCA_SUCCESS)
+		return result;
+
+	return doca_sta_io_event_transport_err_register_cb(sta_io, on_sta_io_transport_err, user_data);
+}
 static doca_error_t
 register_sta_event_callbacks(struct doca_sta *sta)
 {
@@ -640,10 +672,19 @@ open_local_dev(const struct device_selector *selector, struct doca_dev **out)
 static void
 cleanup(struct app_state *app)
 {
+	if (app->io_ctx != NULL && app->main_pe != NULL) {
+		doca_error_t result = doca_ctx_stop(app->io_ctx);
+		if (result != DOCA_SUCCESS && result != DOCA_ERROR_IN_PROGRESS && result != DOCA_ERROR_BAD_STATE)
+			fprintf(stderr, "[WARN] doca_ctx_stop(io) failed: %s\n", doca_error_get_descr(result));
+		result = wait_until_state(app->main_pe, app->io_ctx, DOCA_CTX_STATE_IDLE, "io_ctx(stop)");
+		if (result != DOCA_SUCCESS)
+			fprintf(stderr, "[WARN] IO ctx did not return to IDLE before cleanup: %s\n", doca_error_get_descr(result));
+	}
+
 	if (app->main_ctx != NULL && app->main_pe != NULL) {
 		doca_error_t result = doca_ctx_stop(app->main_ctx);
 		if (result != DOCA_SUCCESS && result != DOCA_ERROR_IN_PROGRESS && result != DOCA_ERROR_BAD_STATE)
-			fprintf(stderr, "[WARN] doca_ctx_stop failed: %s\n", doca_error_get_descr(result));
+			fprintf(stderr, "[WARN] doca_ctx_stop(main) failed: %s\n", doca_error_get_descr(result));
 		result = wait_until_state(app->main_pe, app->main_ctx, DOCA_CTX_STATE_IDLE, "main_ctx(stop)");
 		if (result != DOCA_SUCCESS)
 			fprintf(stderr, "[WARN] main ctx did not return to IDLE before cleanup: %s\n", doca_error_get_descr(result));
@@ -651,6 +692,9 @@ cleanup(struct app_state *app)
 
 	if (app->main_pe != NULL)
 		(void)doca_pe_destroy(app->main_pe);
+
+	if (app->sta_io != NULL)
+		(void)doca_sta_io_destroy(app->sta_io);
 
 	if (app->sta != NULL)
 		(void)doca_sta_destroy(app->sta);
@@ -667,8 +711,8 @@ usage(const char *prog)
 {
 	fprintf(stderr,
 		"Usage:\n"
-		"  %s --pf-dev <PCI_BDF|IBDEV|IFACE> --sf-dev <PCI_BDF|IFACE|IBDEV> [--max-sta-io N] [--hold-seconds N]\n"
-		"  %s --pf-dev <PCI_BDF|IBDEV|IFACE> --skip-add-dev [--max-sta-io N] [--hold-seconds N]\n"
+		"  %s --pf-dev <PCI_BDF|IBDEV|IFACE> --sf-dev <PCI_BDF|IFACE|IBDEV> [--max-sta-io N] [--hold-seconds N] [--start-io]\n"
+		"  %s --pf-dev <PCI_BDF|IBDEV|IFACE> --skip-add-dev [--max-sta-io N] [--hold-seconds N] [--start-io]\n"
 		"  %s --list\n",
 		prog, prog, prog);
 }
@@ -718,6 +762,11 @@ parse_args(int argc, char **argv, struct config *cfg)
 				return -1;
 			}
 			cfg->hold_seconds = (uint32_t)value;
+			continue;
+		}
+
+		if (strcmp(argv[i], "--start-io") == 0) {
+			cfg->start_io = true;
 			continue;
 		}
 
@@ -771,11 +820,12 @@ main(int argc, char **argv)
 	if (!app.cfg.skip_add_dev)
 		sf_selector = parse_selector(app.cfg.sf_dev);
 
-	printf("[DBG] requested pf_dev=%s sf_dev=%s max_sta_io=%u hold_seconds=%u skip_add_dev=%s\n",
+	printf("[DBG] requested pf_dev=%s sf_dev=%s max_sta_io=%u hold_seconds=%u start_io=%s skip_add_dev=%s\n",
 	       app.cfg.pf_dev,
 	       app.cfg.sf_dev != NULL ? app.cfg.sf_dev : "<none>",
 	       app.cfg.max_sta_io,
 	       app.cfg.hold_seconds,
+	       app.cfg.start_io ? "yes" : "no",
 	       app.cfg.skip_add_dev ? "yes" : "no");
 
 	result = open_local_dev(&pf_selector, &app.pf_dev);
@@ -915,6 +965,69 @@ main(int argc, char **argv)
 	}
 
 	printf("[OK] main STA context is RUNNING\n");
+
+	if (app.cfg.start_io) {
+		result = doca_sta_io_create(app.sta, &app.sta_io);
+		if (result != DOCA_SUCCESS) {
+			fprintf(stderr, "doca_sta_io_create failed: %s\n", doca_error_get_descr(result));
+			cleanup(&app);
+			return 1;
+		}
+		printf("[OK] doca_sta_io_create\n");
+
+		result = register_sta_io_confs(app.sta_io);
+		if (result != DOCA_SUCCESS) {
+			fprintf(stderr, "register STA IO confs failed: %s\n", doca_error_get_descr(result));
+			cleanup(&app);
+			return 1;
+		}
+		printf("[OK] STA IO task/event configurations registered\n");
+
+		app.io_ctx = doca_sta_io_as_ctx(app.sta_io);
+		if (app.io_ctx == NULL) {
+			fprintf(stderr, "doca_sta_io_as_ctx returned null\n");
+			cleanup(&app);
+			return 1;
+		}
+
+		result = doca_ctx_set_user_data(app.io_ctx, (union doca_data){ .ptr = "sta_io" });
+		if (result != DOCA_SUCCESS) {
+			fprintf(stderr, "doca_ctx_set_user_data(io) failed: %s\n", doca_error_get_descr(result));
+			cleanup(&app);
+			return 1;
+		}
+
+		result = doca_ctx_set_state_changed_cb(app.io_ctx, ctx_state_changed_cb);
+		if (result != DOCA_SUCCESS) {
+			fprintf(stderr, "doca_ctx_set_state_changed_cb(io) failed: %s\n", doca_error_get_descr(result));
+			cleanup(&app);
+			return 1;
+		}
+
+		result = doca_pe_connect_ctx(app.main_pe, app.io_ctx);
+		if (result != DOCA_SUCCESS) {
+			fprintf(stderr, "doca_pe_connect_ctx(io) failed: %s\n", doca_error_get_descr(result));
+			cleanup(&app);
+			return 1;
+		}
+
+		result = doca_ctx_start(app.io_ctx);
+		if (result != DOCA_SUCCESS && result != DOCA_ERROR_IN_PROGRESS) {
+			fprintf(stderr, "doca_ctx_start(io) failed immediately: %s\n", doca_error_get_descr(result));
+			cleanup(&app);
+			return 1;
+		}
+		if (result == DOCA_ERROR_IN_PROGRESS)
+			printf("[OK] doca_ctx_start(io) returned IN_PROGRESS; waiting for RUNNING\n");
+
+		result = wait_until_running(app.main_pe, app.io_ctx, "io_ctx");
+		if (result != DOCA_SUCCESS) {
+			fprintf(stderr, "IO ctx did not reach RUNNING: %s\n", doca_error_get_descr(result));
+			cleanup(&app);
+			return 1;
+		}
+		printf("[OK] STA IO context is RUNNING\n");
+	}
 	if (app.cfg.hold_seconds > 0) {
 		printf("[INFO] holding RUNNING context for %u seconds\n", app.cfg.hold_seconds);
 		for (uint32_t sec = 0; sec < app.cfg.hold_seconds; ++sec) {

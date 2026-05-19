@@ -13,6 +13,16 @@ fi
 PF_DEV="${1:-mlx5_2}"
 SF_DEV="${2:-mlx5_4}"
 MAX_STA_IO="${3:-1}"
+HOLD_SECONDS="${4:-10}"
+START_IO="${5:-0}"
+
+export STA_COMP_EU_MASK_P0="${STA_COMP_EU_MASK_P0:-0-3}"
+export STA_TX_EU_MASK_P0="${STA_TX_EU_MASK_P0:-4-7}"
+export STA_BE_Q_EU_MASK="${STA_BE_Q_EU_MASK:-8-11}"
+export STA_DOCA_RDMA_ENABLE="${STA_DOCA_RDMA_ENABLE:-1}"
+export STA_MAX_QPS_NUM="${STA_MAX_QPS_NUM:-1024}"
+unset STA_COMP_EU_MASK_P1
+unset STA_TX_EU_MASK_P1
 
 echo "[1/3] Updating repository"
 git -C "${REPO_ROOT}" pull --ff-only
@@ -25,5 +35,9 @@ echo "[3/3] Running doca-sta-rdma-tool"
 if [[ "${LIST_ONLY}" -eq 1 ]]; then
   "${TOOL_DIR}/build/doca-sta-rdma-tool" --list
 else
-  "${TOOL_DIR}/build/doca-sta-rdma-tool" --pf-dev "${PF_DEV}" --sf-dev "${SF_DEV}" --max-sta-io "${MAX_STA_IO}"
+  EXTRA_ARGS=(--hold-seconds "${HOLD_SECONDS}")
+  if [[ "${START_IO}" == "1" || "${START_IO}" == "true" || "${START_IO}" == "yes" ]]; then
+    EXTRA_ARGS+=(--start-io)
+  fi
+  "${TOOL_DIR}/build/doca-sta-rdma-tool" --pf-dev "${PF_DEV}" --sf-dev "${SF_DEV}" --max-sta-io "${MAX_STA_IO}" "${EXTRA_ARGS[@]}"
 fi

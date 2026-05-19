@@ -14,8 +14,8 @@ The immediate goal is narrower than remote IO. This tool verifies only that a ho
 
 Only after that baseline is stable should the code grow into:
 
-1. Remote subsystem / namespace configuration.
-2. STA IO context bring-up.
+1. STA IO context bring-up.
+2. Remote subsystem / namespace configuration.
 3. Synthetic host-side IO submission.
 4. GPU-originated IO submission.
 
@@ -44,7 +44,16 @@ List what DOCA sees on the host:
 Run the main-context probe with the currently validated host NIC-mode pairing:
 
 ```bash
+export STA_COMP_EU_MASK_P0=0-3
+export STA_TX_EU_MASK_P0=4-7
+export STA_BE_Q_EU_MASK=8-11
+export STA_DOCA_RDMA_ENABLE=1
+export STA_MAX_QPS_NUM=1024
+unset STA_COMP_EU_MASK_P1
+unset STA_TX_EU_MASK_P1
+
 ./build/doca-sta-rdma-tool --pf-dev mlx5_2 --sf-dev mlx5_4 --max-sta-io 1 --hold-seconds 10
+./build/doca-sta-rdma-tool --pf-dev mlx5_2 --sf-dev mlx5_4 --max-sta-io 1 --hold-seconds 10 --start-io
 ```
 
 In the current BF3 NIC-mode setup:
@@ -72,7 +81,7 @@ If the control-only run succeeds but the PF+SF run fails, the failure is isolate
 
 ## Current Scope
 
-This tool currently validates only main STA context bring-up:
+This tool currently validates main STA context bring-up and can optionally validate STA IO context bring-up with `--start-io`:
 
 - device discovery
 - STA capability check
