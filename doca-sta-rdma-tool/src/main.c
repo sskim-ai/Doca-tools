@@ -1,13 +1,17 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#include <netdb.h>
 #include <sys/mman.h>
+
+#include <rdma/rdma_cma.h>
 
 #include <doca_ctx.h>
 #include <doca_dev.h>
@@ -18,6 +22,7 @@
 #include <doca_sta_be.h>
 #include <doca_sta_io.h>
 #include <doca_sta_io_non_offload.h>
+#include <doca_sta_io_qp.h>
 #include <doca_sta_event.h>
 #include <doca_sta_mem.h>
 #include <doca_sta_subsystem.h>
@@ -28,8 +33,13 @@ struct config {
 	const char *sf_dev;
 	uint16_t max_sta_io;
 	uint32_t hold_seconds;
+	const char *subsystem_nqn;
+	const char *listen_traddr;
+	const char *listen_trsvcid;
+	uint32_t listen_seconds;
 	bool skip_add_dev;
 	bool start_io;
+	bool offload_listen;
 };
 
 struct app_state {
@@ -38,6 +48,11 @@ struct app_state {
 	struct doca_dev *sf_dev;
 	struct doca_sta *sta;
 	struct doca_sta_io *sta_io;
+	struct doca_sta_subs_handle *subs_handle;
+	struct doca_sta_qp_handle *qp_handle;
+	struct rdma_event_channel *cm_channel;
+	struct rdma_cm_id *listen_id;
+	struct rdma_cm_id *client_id;
 	struct doca_ctx *main_ctx;
 	struct doca_ctx *io_ctx;
 	struct doca_pe *main_pe;
@@ -704,9 +719,224 @@ open_local_dev(const struct device_selector *selector, struct doca_dev **out)
 	return DOCA_ERROR_NOT_FOUND;
 }
 
+
+static int
+create_bound_listener(struct app_state *app)
+{
+	struct addrinfo hints = {0};
+	struct addrinfo *res = NULL;
+	int rc;
+
+	hints.ai_flags = AI_PASSIVE;
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+
+	rc = getaddrinfo(app->cfg.listen_traddr, app->cfg.listen_trsvcid, &hints, &res);
+	if (rc != 0) {
+		fprintf(stderr, "getaddrinfo(%s,%s) failed: %s\n",
+			app->cfg.listen_traddr, app->cfg.listen_trsvcid, gai_strerror(rc));
+		return -1;
+	}
+
+	app->cm_channel = rdma_create_event_channel();
+	if (app->cm_channel == NULL) {
+		fprintf(stderr, "rdma_create_event_channel failed: %s\n", strerror(errno));
+		freeaddrinfo(res);
+		return -1;
+	}
+
+	rc = rdma_create_id(app->cm_channel, &app->listen_id, app, RDMA_PS_TCP);
+	if (rc != 0) {
+		fprintf(stderr, "rdma_create_id(listener) failed: %s\n", strerror(errno));
+		freeaddrinfo(res);
+		return -1;
+	}
+
+	rc = rdma_bind_addr(app->listen_id, res->ai_addr);
+	freeaddrinfo(res);
+	if (rc != 0) {
+		fprintf(stderr, "rdma_bind_addr(%s:%s) failed: %s\n",
+			app->cfg.listen_traddr, app->cfg.listen_trsvcid, strerror(errno));
+		return -1;
+	}
+
+	rc = rdma_listen(app->listen_id, 16);
+	if (rc != 0) {
+		fprintf(stderr, "rdma_listen failed: %s\n", strerror(errno));
+		return -1;
+	}
+
+	printf("[OK] RDMA CM listener active on %s:%s\n", app->cfg.listen_traddr, app->cfg.listen_trsvcid);
+	return 0;
+}
+
+static int
+handle_connect_request(struct app_state *app, struct rdma_cm_event *event)
+{
+	doca_error_t result;
+	uint32_t qp_id = 0;
+	uint16_t port_id = 0;
+
+	printf("[EVT] RDMA_CM_EVENT_CONNECT_REQUEST private_data_len=%u responder_resources=%u initiator_depth=%u\n",
+	       event->param.conn.private_data_len,
+	       event->param.conn.responder_resources,
+	       event->param.conn.initiator_depth);
+
+	if (app->qp_handle != NULL || app->client_id != NULL) {
+		fprintf(stderr, "only one diagnostic STA QP connection is supported in this run\n");
+		return -1;
+	}
+
+	app->client_id = event->id;
+	result = doca_sta_io_qp_alloc(app->sta_io, app->sf_dev, &app->qp_handle);
+	if (result != DOCA_SUCCESS) {
+		fprintf(stderr, "doca_sta_io_qp_alloc failed: %s\n", doca_error_get_descr(result));
+		return -1;
+	}
+	printf("[OK] doca_sta_io_qp_alloc\n");
+
+	result = doca_sta_io_qp_accept(app->sta_io,
+					 app->qp_handle,
+					 app->sf_dev,
+					 event->id,
+					 NULL,
+					 0,
+					 app->subs_handle);
+	if (result != DOCA_SUCCESS) {
+		fprintf(stderr, "doca_sta_io_qp_accept failed: %s\n", doca_error_get_descr(result));
+		return -1;
+	}
+
+	(void)doca_sta_io_qp_get_id(app->qp_handle, &qp_id);
+	(void)doca_sta_io_qp_get_port_id(app->qp_handle, &port_id);
+	printf("[OK] doca_sta_io_qp_accept qpn=%u port_id=%u\n", qp_id, port_id);
+	return 0;
+}
+
+static int
+run_sta_offload_listener(struct app_state *app)
+{
+	doca_error_t result;
+	uint32_t elapsed_ms = 0;
+	const uint32_t timeout_ms = app->cfg.listen_seconds * 1000U;
+	struct pollfd pfd;
+
+	result = doca_sta_subsystem_create(app->sta, app->cfg.subsystem_nqn, &app->subs_handle);
+	if (result != DOCA_SUCCESS) {
+		fprintf(stderr, "doca_sta_subsystem_create(%s) failed: %s\n",
+			app->cfg.subsystem_nqn, doca_error_get_descr(result));
+		return -1;
+	}
+	printf("[OK] doca_sta_subsystem_create nqn=%s\n", app->cfg.subsystem_nqn);
+
+	result = doca_sta_subsystem_add_dev(app->subs_handle, app->sf_dev);
+	if (result != DOCA_SUCCESS) {
+		fprintf(stderr, "doca_sta_subsystem_add_dev failed: %s\n", doca_error_get_descr(result));
+		return -1;
+	}
+	printf("[OK] doca_sta_subsystem_add_dev\n");
+
+	if (create_bound_listener(app) != 0)
+		return -1;
+
+	printf("[INFO] waiting for one RDMA/NVMe-oF connection for %u seconds\n", app->cfg.listen_seconds);
+	pfd.fd = app->cm_channel->fd;
+	pfd.events = POLLIN;
+	pfd.revents = 0;
+
+	while (elapsed_ms < timeout_ms) {
+		struct rdma_cm_event *event = NULL;
+		int poll_rc;
+
+		(void)doca_pe_progress(app->main_pe);
+		poll_rc = poll(&pfd, 1, 100);
+		if (poll_rc < 0) {
+			if (errno == EINTR)
+				continue;
+			fprintf(stderr, "poll(RDMA CM) failed: %s\n", strerror(errno));
+			return -1;
+		}
+		if (poll_rc == 0) {
+			elapsed_ms += 100;
+			continue;
+		}
+
+		if (rdma_get_cm_event(app->cm_channel, &event) != 0) {
+			fprintf(stderr, "rdma_get_cm_event failed: %s\n", strerror(errno));
+			return -1;
+		}
+
+		printf("[EVT] RDMA CM event=%s status=%d\n", rdma_event_str(event->event), event->status);
+
+		if (event->event == RDMA_CM_EVENT_CONNECT_REQUEST) {
+			if (handle_connect_request(app, event) != 0) {
+				rdma_ack_cm_event(event);
+				return -1;
+			}
+			rdma_ack_cm_event(event);
+			continue;
+		}
+
+		if (event->event == RDMA_CM_EVENT_ESTABLISHED) {
+			if (app->qp_handle != NULL) {
+				result = doca_sta_io_qp_connect_established(app->sta_io, app->qp_handle);
+				if (result != DOCA_SUCCESS) {
+					fprintf(stderr, "doca_sta_io_qp_connect_established failed: %s\n",
+						doca_error_get_descr(result));
+					rdma_ack_cm_event(event);
+					return -1;
+				}
+				printf("[OK] STA QP connection established/offloaded\n");
+			}
+			rdma_ack_cm_event(event);
+			continue;
+		}
+
+		if (event->event == RDMA_CM_EVENT_DISCONNECTED || event->event == RDMA_CM_EVENT_REJECTED ||
+		    event->event == RDMA_CM_EVENT_CONNECT_ERROR || event->event == RDMA_CM_EVENT_UNREACHABLE) {
+			rdma_ack_cm_event(event);
+			printf("[INFO] RDMA CM terminal event received; leaving listener\n");
+			return 0;
+		}
+
+		rdma_ack_cm_event(event);
+	}
+
+	printf("[INFO] no RDMA/NVMe-oF connection received before listener timeout\n");
+	return 0;
+}
+
 static void
 cleanup(struct app_state *app)
 {
+	if (app->qp_handle != NULL && app->sta_io != NULL) {
+		doca_error_t result = doca_sta_io_qp_destroy(app->sta_io, app->qp_handle);
+		if (result != DOCA_SUCCESS)
+			fprintf(stderr, "[WARN] doca_sta_io_qp_destroy failed: %s\n", doca_error_get_descr(result));
+		app->qp_handle = NULL;
+	}
+
+	if (app->client_id != NULL) {
+		rdma_destroy_id(app->client_id);
+		app->client_id = NULL;
+	}
+
+	if (app->listen_id != NULL) {
+		rdma_destroy_id(app->listen_id);
+		app->listen_id = NULL;
+	}
+
+	if (app->cm_channel != NULL) {
+		rdma_destroy_event_channel(app->cm_channel);
+		app->cm_channel = NULL;
+	}
+
+	if (app->subs_handle != NULL) {
+		doca_error_t result = doca_sta_subsystem_destroy(app->subs_handle);
+		if (result != DOCA_SUCCESS)
+			fprintf(stderr, "[WARN] doca_sta_subsystem_destroy failed: %s\n", doca_error_get_descr(result));
+		app->subs_handle = NULL;
+	}
 	if (app->io_ctx != NULL && app->main_pe != NULL) {
 		doca_error_t result = doca_ctx_stop(app->io_ctx);
 		if (result != DOCA_SUCCESS && result != DOCA_ERROR_IN_PROGRESS && result != DOCA_ERROR_BAD_STATE)
@@ -747,6 +977,7 @@ usage(const char *prog)
 	fprintf(stderr,
 		"Usage:\n"
 		"  %s --pf-dev <PCI_BDF|IBDEV|IFACE> --sf-dev <PCI_BDF|IFACE|IBDEV> [--max-sta-io N] [--hold-seconds N] [--start-io]\n"
+		"     [--subsystem-nqn NQN --listen-traddr IP --listen-trsvcid PORT [--listen-seconds N]]\n"
 		"  %s --pf-dev <PCI_BDF|IBDEV|IFACE> --skip-add-dev [--max-sta-io N] [--hold-seconds N] [--start-io]\n"
 		"  %s --list\n",
 		prog, prog, prog);
@@ -805,12 +1036,51 @@ parse_args(int argc, char **argv, struct config *cfg)
 			continue;
 		}
 
+		if (strcmp(argv[i], "--subsystem-nqn") == 0 && i + 1 < argc) {
+			cfg->subsystem_nqn = argv[++i];
+			continue;
+		}
+
+		if (strcmp(argv[i], "--listen-traddr") == 0 && i + 1 < argc) {
+			cfg->listen_traddr = argv[++i];
+			continue;
+		}
+
+		if (strcmp(argv[i], "--listen-trsvcid") == 0 && i + 1 < argc) {
+			cfg->listen_trsvcid = argv[++i];
+			continue;
+		}
+
+		if (strcmp(argv[i], "--listen-seconds") == 0 && i + 1 < argc) {
+			char *end = NULL;
+			unsigned long value = strtoul(argv[++i], &end, 0);
+
+			if (end == argv[i] || *end != '\0' || value == 0 || value > UINT32_MAX) {
+				fprintf(stderr, "invalid --listen-seconds value: %s\n", argv[i]);
+				return -1;
+			}
+			cfg->listen_seconds = (uint32_t)value;
+			continue;
+		}
+
 		fprintf(stderr, "unknown or incomplete arg: %s\n", argv[i]);
 		return -1;
 	}
 
 	if (cfg->max_sta_io == 0)
 		cfg->max_sta_io = 1;
+
+	if (cfg->listen_seconds == 0)
+		cfg->listen_seconds = 30;
+
+	if (cfg->subsystem_nqn != NULL || cfg->listen_traddr != NULL || cfg->listen_trsvcid != NULL) {
+		if (cfg->subsystem_nqn == NULL || cfg->listen_traddr == NULL || cfg->listen_trsvcid == NULL) {
+			fprintf(stderr, "--subsystem-nqn, --listen-traddr, and --listen-trsvcid must be provided together\n");
+			return -1;
+		}
+		cfg->offload_listen = true;
+		cfg->start_io = true;
+	}
 
 	if (cfg->pf_dev == NULL)
 		return -1;
@@ -855,12 +1125,16 @@ main(int argc, char **argv)
 	if (!app.cfg.skip_add_dev)
 		sf_selector = parse_selector(app.cfg.sf_dev);
 
-	printf("[DBG] requested pf_dev=%s sf_dev=%s max_sta_io=%u hold_seconds=%u start_io=%s skip_add_dev=%s\n",
+	printf("[DBG] requested pf_dev=%s sf_dev=%s max_sta_io=%u hold_seconds=%u start_io=%s offload_listen=%s listen=%s:%s nqn=%s skip_add_dev=%s\n",
 	       app.cfg.pf_dev,
 	       app.cfg.sf_dev != NULL ? app.cfg.sf_dev : "<none>",
 	       app.cfg.max_sta_io,
 	       app.cfg.hold_seconds,
 	       app.cfg.start_io ? "yes" : "no",
+	       app.cfg.offload_listen ? "yes" : "no",
+	       app.cfg.listen_traddr != NULL ? app.cfg.listen_traddr : "<none>",
+	       app.cfg.listen_trsvcid != NULL ? app.cfg.listen_trsvcid : "<none>",
+	       app.cfg.subsystem_nqn != NULL ? app.cfg.subsystem_nqn : "<none>",
 	       app.cfg.skip_add_dev ? "yes" : "no");
 
 	result = open_local_dev(&pf_selector, &app.pf_dev);
@@ -1063,6 +1337,20 @@ main(int argc, char **argv)
 		}
 		printf("[OK] STA IO context is RUNNING\n");
 	}
+
+	if (app.cfg.offload_listen) {
+		if (app.sta_io == NULL) {
+			fprintf(stderr, "offload listener requires STA IO context\n");
+			cleanup(&app);
+			return 1;
+		}
+
+		if (run_sta_offload_listener(&app) != 0) {
+			cleanup(&app);
+			return 1;
+		}
+	}
+
 	if (app.cfg.hold_seconds > 0) {
 		printf("[INFO] holding RUNNING context for %u seconds\n", app.cfg.hold_seconds);
 		for (uint32_t sec = 0; sec < app.cfg.hold_seconds; ++sec) {

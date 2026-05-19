@@ -56,6 +56,21 @@ unset STA_TX_EU_MASK_P1
 ./build/doca-sta-rdma-tool --pf-dev mlx5_2 --sf-dev mlx5_4 --max-sta-io 1 --hold-seconds 10 --start-io
 ```
 
+Run the first NVMe-oF/RDMA offload probe. This creates a STA subsystem, binds it to the SF traffic device, starts an RDMA CM listener, and attempts to accept one incoming connection as a STA offloaded QP:
+
+```bash
+sudo -E ./build/doca-sta-rdma-tool \
+  --pf-dev mlx5_2 \
+  --sf-dev mlx5_4 \
+  --max-sta-io 1 \
+  --subsystem-nqn nqn.2026-03.io.example:sta0 \
+  --listen-traddr 10.10.1.2 \
+  --listen-trsvcid 4420 \
+  --listen-seconds 60
+```
+
+From an RDMA/NVMe-oF initiator host, attempt a connection to `10.10.1.2:4420` while the listener is running. This step is a network/QP offload diagnostic; backend namespace and real IO submission are not wired yet.
+
 In the current BF3 NIC-mode setup:
 
 - `mlx5_2` is the DPA/FlexIO-capable control device. `dpa-resource-mgmt` and the FlexIO RPC sample work on this device.
@@ -91,13 +106,15 @@ This tool currently validates main STA context bring-up and can optionally valid
 - STA resource/capability dump before start
 - `doca_sta` create/add_dev/start
 - optional `doca_sta_io` create/start with required disconnect, transport-error, and non-offload callbacks
+- optional subsystem creation and SF device binding
+- optional RDMA CM listener and one STA QP accept attempt for NVMe-oF/network offload diagnosis
 - progress engine integration
 
 It does not yet configure:
 
 - backend handles
-- subsystems / namespaces
-- QPs
+- namespaces
+- complete NVMe-oF private-data negotiation
 - remote IO submission
 
 Those will be added as the next stage once host-side STA bring-up is confirmed.

@@ -15,6 +15,10 @@ SF_DEV="${2:-mlx5_4}"
 MAX_STA_IO="${3:-1}"
 HOLD_SECONDS="${4:-10}"
 START_IO="${5:-0}"
+SUBSYSTEM_NQN="${6:-}"
+LISTEN_TRADDR="${7:-}"
+LISTEN_TRSVCID="${8:-4420}"
+LISTEN_SECONDS="${9:-30}"
 
 export STA_COMP_EU_MASK_P0="${STA_COMP_EU_MASK_P0:-0-3}"
 export STA_TX_EU_MASK_P0="${STA_TX_EU_MASK_P0:-4-7}"
@@ -38,6 +42,13 @@ else
   EXTRA_ARGS=(--hold-seconds "${HOLD_SECONDS}")
   if [[ "${START_IO}" == "1" || "${START_IO}" == "true" || "${START_IO}" == "yes" ]]; then
     EXTRA_ARGS+=(--start-io)
+  fi
+  if [[ -n "${SUBSYSTEM_NQN}" || -n "${LISTEN_TRADDR}" ]]; then
+    if [[ -z "${SUBSYSTEM_NQN}" || -z "${LISTEN_TRADDR}" ]]; then
+      echo "SUBSYSTEM_NQN and LISTEN_TRADDR must be provided together" >&2
+      exit 1
+    fi
+    EXTRA_ARGS+=(--subsystem-nqn "${SUBSYSTEM_NQN}" --listen-traddr "${LISTEN_TRADDR}" --listen-trsvcid "${LISTEN_TRSVCID}" --listen-seconds "${LISTEN_SECONDS}")
   fi
   "${TOOL_DIR}/build/doca-sta-rdma-tool" --pf-dev "${PF_DEV}" --sf-dev "${SF_DEV}" --max-sta-io "${MAX_STA_IO}" "${EXTRA_ARGS[@]}"
 fi

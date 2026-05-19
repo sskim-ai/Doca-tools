@@ -7,11 +7,12 @@ doca_lib_dir = '/opt/mellanox/doca/lib/' + host_machine.cpu_family() + '-linux-g
 doca_common = cc.find_library('doca_common', dirs : doca_lib_dir, required : true)
 doca_argp = cc.find_library('doca_argp', dirs : doca_lib_dir, required : true)
 doca_sta = cc.find_library('doca_sta', dirs : doca_lib_dir, required : true)
+rdmacm = dependency('librdmacm', required : true)
 
 executable(
   'doca-sta-rdma-tool',
   'src/main.c',
   include_directories : [doca_inc],
-  dependencies : [doca_common, doca_argp, doca_sta],
+  dependencies : [doca_common, doca_argp, doca_sta, rdmacm],
   install : false,
 )
