@@ -74,6 +74,7 @@ This tool currently validates only main STA context bring-up:
 
 - device discovery
 - STA capability check
+- STA resource/capability dump before start
 - `doca_sta` create/add_dev/start
 - progress engine integration
 

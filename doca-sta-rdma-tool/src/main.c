@@ -163,6 +163,61 @@ progress_ctx_for_debug(struct doca_pe *pe, struct doca_ctx *ctx, const char *tag
 	}
 }
 
+
+static void
+print_u32_result(const char *name, doca_error_t result, uint32_t value)
+{
+	if (result == DOCA_SUCCESS)
+		printf("[CAP] %s=%u\n", name, value);
+	else
+		printf("[CAP] %s=<%s>\n", name, doca_error_get_descr(result));
+}
+
+static void
+print_u16_result(const char *name, doca_error_t result, uint16_t value)
+{
+	if (result == DOCA_SUCCESS)
+		printf("[CAP] %s=%u\n", name, value);
+	else
+		printf("[CAP] %s=<%s>\n", name, doca_error_get_descr(result));
+}
+
+static void
+dump_sta_caps(struct doca_sta *sta)
+{
+	uint16_t value16 = 0;
+	uint32_t value32 = 0;
+
+	print_u32_result("max_devs", doca_sta_get_max_devs(&value32), value32);
+	value32 = 0;
+	print_u32_result("max_subsys", doca_sta_get_max_subsys(&value32), value32);
+	value32 = 0;
+	print_u32_result("max_ns_per_subsys", doca_sta_get_max_ns_per_subs(&value32), value32);
+	value32 = 0;
+	print_u32_result("max_qps", doca_sta_get_max_qps(&value32), value32);
+	value32 = 0;
+	print_u32_result("max_io_threads", doca_sta_get_max_io_threads(&value32), value32);
+	value32 = 0;
+	print_u32_result("max_io_size", doca_sta_get_max_io_size(&value32), value32);
+	value32 = 0;
+	print_u32_result("max_ioccsz", doca_sta_get_max_ioccsz(&value32), value32);
+	value32 = 0;
+	print_u32_result("max_iorcsz", doca_sta_get_max_iorcsz(&value32), value32);
+	value32 = 0;
+	print_u32_result("max_be", doca_sta_get_max_be(&value32), value32);
+	value32 = 0;
+	print_u32_result("max_qs_per_be", doca_sta_get_max_qs_per_be(&value32), value32);
+	value32 = 0;
+	print_u32_result("max_num_eus_available", doca_sta_get_max_num_eus_available(sta, &value32), value32);
+	value32 = 0;
+	print_u32_result("max_connected_qp_per_eu", doca_sta_get_max_num_connected_qp_per_eu(sta, &value32), value32);
+	value32 = 0;
+	print_u32_result("max_io_num_per_dev", doca_sta_get_max_io_num_per_dev(sta, &value32), value32);
+	value32 = 0;
+	print_u32_result("max_io_queue_size", doca_sta_get_max_io_queue_size(sta, &value32), value32);
+	print_u16_result("configured_max_sta_io", doca_sta_get_max_sta_io(sta, &value16), value16);
+}
+
 static doca_error_t
 wait_until_running(struct doca_pe *pe, struct doca_ctx *ctx, const char *name)
 {
@@ -411,6 +466,7 @@ main(int argc, char **argv)
 		return 1;
 	}
 	printf("[OK] doca_sta_set_max_sta_io(%u)\n", app.cfg.max_sta_io);
+	dump_sta_caps(app.sta);
 
 	if (!app.cfg.skip_add_dev) {
 		result = doca_sta_add_dev(app.sta, app.sf_dev);
