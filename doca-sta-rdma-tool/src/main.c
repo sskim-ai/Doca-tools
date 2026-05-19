@@ -814,12 +814,9 @@ handle_connect_request(struct app_state *app, struct rdma_cm_event *event)
 }
 
 static int
-run_sta_offload_listener(struct app_state *app)
+configure_sta_subsystem(struct app_state *app)
 {
 	doca_error_t result;
-	uint32_t elapsed_ms = 0;
-	const uint32_t timeout_ms = app->cfg.listen_seconds * 1000U;
-	struct pollfd pfd;
 
 	result = doca_sta_subsystem_create(app->sta, app->cfg.subsystem_nqn, &app->subs_handle);
 	if (result != DOCA_SUCCESS) {
@@ -835,6 +832,21 @@ run_sta_offload_listener(struct app_state *app)
 		return -1;
 	}
 	printf("[OK] doca_sta_subsystem_add_dev\n");
+	return 0;
+}
+
+static int
+run_sta_offload_listener(struct app_state *app)
+{
+	doca_error_t result;
+	uint32_t elapsed_ms = 0;
+	const uint32_t timeout_ms = app->cfg.listen_seconds * 1000U;
+	struct pollfd pfd;
+
+	if (app->subs_handle == NULL) {
+		fprintf(stderr, "STA subsystem is not configured before listener start\n");
+		return -1;
+	}
 
 	if (create_bound_listener(app) != 0)
 		return -1;
@@ -1082,6 +1094,11 @@ parse_args(int argc, char **argv, struct config *cfg)
 		cfg->start_io = true;
 	}
 
+	if (cfg->offload_listen && cfg->skip_add_dev) {
+		fprintf(stderr, "offload listener requires --sf-dev and cannot be used with --skip-add-dev\n");
+		return -1;
+	}
+
 	if (cfg->pf_dev == NULL)
 		return -1;
 
@@ -1217,6 +1234,13 @@ main(int argc, char **argv)
 		dump_sta_caps("after add_dev", app.sta);
 	} else {
 		printf("[DBG] skipping doca_sta_add_dev for control-only diagnostic run\n");
+	}
+
+	if (app.cfg.offload_listen) {
+		if (configure_sta_subsystem(&app) != 0) {
+			cleanup(&app);
+			return 1;
+		}
 	}
 
 	app.main_ctx = doca_sta_as_ctx(app.sta);
