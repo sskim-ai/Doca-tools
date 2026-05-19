@@ -9,8 +9,8 @@ if [[ "${1:-}" == "--list" ]]; then
 else
   LIST_ONLY=0
 fi
-PF_DEV="${1:-0000:da:00.0}"
-SF_DEV="${2:-enpdas0f0s88}"
+PF_DEV="${1:-mlx5_2}"
+SF_DEV="${2:-mlx5_4}"
 
 echo "[1/3] Updating repository"
 git -C "${REPO_ROOT}" pull --ff-only

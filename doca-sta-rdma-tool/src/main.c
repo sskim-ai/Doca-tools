@@ -281,7 +281,7 @@ usage(const char *prog)
 {
 	fprintf(stderr,
 		"Usage:\n"
-		"  %s --pf-dev <PCI_BDF> --sf-dev <PCI_BDF|IFACE|IBDEV>\n"
+		"  %s --pf-dev <PCI_BDF|IBDEV|IFACE> --sf-dev <PCI_BDF|IFACE|IBDEV>\n"
 		"  %s --list\n",
 		prog, prog);
 }

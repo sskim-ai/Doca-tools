@@ -41,12 +41,24 @@ List what DOCA sees on the host:
 ./build/doca-sta-rdma-tool --list
 ```
 
-Run the main-context probe:
+Run the main-context probe with the currently validated host NIC-mode pairing:
 
 ```bash
-./build/doca-sta-rdma-tool --pf-dev 0000:da:00.0 --sf-dev enpdas0f0s88
+./build/doca-sta-rdma-tool --pf-dev mlx5_2 --sf-dev mlx5_4
+```
+
+In the current BF3 NIC-mode setup:
+
+- `mlx5_2` is the DPA/FlexIO-capable control device. `dpa-resource-mgmt` and the FlexIO RPC sample work on this device.
+- `mlx5_4` maps to the SF traffic netdev (`enpdas0f0s88`). It is the STA network/traffic device, but it is not the DPA process owner.
+
+The following is intentionally not the preferred start pairing now:
+
+```bash
 ./build/doca-sta-rdma-tool --pf-dev 0000:da:00.0 --sf-dev mlx5_4
 ```
+
+That form can open DOCA devices, but it does not distinguish the FlexIO-capable ibdev instance from the SF traffic ibdev instance when multiple DOCA devinfos share the same PCI address.
 
 ## Current Scope
 
