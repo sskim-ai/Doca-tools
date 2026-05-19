@@ -44,7 +44,7 @@ List what DOCA sees on the host:
 Run the main-context probe with the currently validated host NIC-mode pairing:
 
 ```bash
-./build/doca-sta-rdma-tool --pf-dev mlx5_2 --sf-dev mlx5_4
+./build/doca-sta-rdma-tool --pf-dev mlx5_2 --sf-dev mlx5_4 --max-sta-io 1
 ```
 
 In the current BF3 NIC-mode setup:
@@ -59,6 +59,14 @@ The following is intentionally not the preferred start pairing now:
 ```
 
 That form can open DOCA devices, but it does not distinguish the FlexIO-capable ibdev instance from the SF traffic ibdev instance when multiple DOCA devinfos share the same PCI address.
+
+For diagnostics, a control-only start can be attempted without adding an SF traffic device:
+
+```bash
+./build/doca-sta-rdma-tool --pf-dev mlx5_2 --skip-add-dev --max-sta-io 1
+```
+
+If the control-only run succeeds but the PF+SF run fails, the failure is isolated to the STA network-device add/start path. If both fail, the failure is in STA main-context resource initialization before traffic-device use.
 
 ## Current Scope
 

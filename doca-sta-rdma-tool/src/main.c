@@ -13,6 +13,8 @@
 struct config {
 	const char *pf_dev;
 	const char *sf_dev;
+	uint16_t max_sta_io;
+	bool skip_add_dev;
 };
 
 struct app_state {
@@ -281,9 +283,10 @@ usage(const char *prog)
 {
 	fprintf(stderr,
 		"Usage:\n"
-		"  %s --pf-dev <PCI_BDF|IBDEV|IFACE> --sf-dev <PCI_BDF|IFACE|IBDEV>\n"
+		"  %s --pf-dev <PCI_BDF|IBDEV|IFACE> --sf-dev <PCI_BDF|IFACE|IBDEV> [--max-sta-io N]\n"
+		"  %s --pf-dev <PCI_BDF|IBDEV|IFACE> --skip-add-dev [--max-sta-io N]\n"
 		"  %s --list\n",
-		prog, prog);
+		prog, prog, prog);
 }
 
 static int
@@ -305,11 +308,34 @@ parse_args(int argc, char **argv, struct config *cfg)
 			continue;
 		}
 
+		if (strcmp(argv[i], "--max-sta-io") == 0 && i + 1 < argc) {
+			char *end = NULL;
+			unsigned long value = strtoul(argv[++i], &end, 0);
+
+			if (end == argv[i] || *end != '\0' || value == 0 || value > UINT16_MAX) {
+				fprintf(stderr, "invalid --max-sta-io value: %s\n", argv[i]);
+				return -1;
+			}
+			cfg->max_sta_io = (uint16_t)value;
+			continue;
+		}
+
+		if (strcmp(argv[i], "--skip-add-dev") == 0) {
+			cfg->skip_add_dev = true;
+			continue;
+		}
+
 		fprintf(stderr, "unknown or incomplete arg: %s\n", argv[i]);
 		return -1;
 	}
 
-	if (cfg->pf_dev == NULL || cfg->sf_dev == NULL)
+	if (cfg->max_sta_io == 0)
+		cfg->max_sta_io = 1;
+
+	if (cfg->pf_dev == NULL)
+		return -1;
+
+	if (!cfg->skip_add_dev && cfg->sf_dev == NULL)
 		return -1;
 
 	return 0;
@@ -333,7 +359,14 @@ main(int argc, char **argv)
 	}
 
 	pf_selector = parse_selector(app.cfg.pf_dev);
-	sf_selector = parse_selector(app.cfg.sf_dev);
+	if (!app.cfg.skip_add_dev)
+		sf_selector = parse_selector(app.cfg.sf_dev);
+
+	printf("[DBG] requested pf_dev=%s sf_dev=%s max_sta_io=%u skip_add_dev=%s\n",
+	       app.cfg.pf_dev,
+	       app.cfg.sf_dev != NULL ? app.cfg.sf_dev : "<none>",
+	       app.cfg.max_sta_io,
+	       app.cfg.skip_add_dev ? "yes" : "no");
 
 	result = open_local_dev(&pf_selector, &app.pf_dev);
 	if (result != DOCA_SUCCESS) {
@@ -342,16 +375,19 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	result = open_local_dev(&sf_selector, &app.sf_dev);
-	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "Failed to open SF device: %s\n", doca_error_get_descr(result));
-		cleanup(&app);
-		dump_doca_devices();
-		return 1;
+	if (!app.cfg.skip_add_dev) {
+		result = open_local_dev(&sf_selector, &app.sf_dev);
+		if (result != DOCA_SUCCESS) {
+			fprintf(stderr, "Failed to open SF device: %s\n", doca_error_get_descr(result));
+			cleanup(&app);
+			dump_doca_devices();
+			return 1;
+		}
 	}
 
 	dump_devinfo("pf_dev", app.pf_dev);
-	dump_devinfo("sf_dev", app.sf_dev);
+	if (app.sf_dev != NULL)
+		dump_devinfo("sf_dev", app.sf_dev);
 
 	result = doca_pe_create(&app.main_pe);
 	if (result != DOCA_SUCCESS) {
@@ -367,11 +403,25 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	result = doca_sta_add_dev(app.sta, app.sf_dev);
+	result = doca_sta_set_max_sta_io(app.sta, app.cfg.max_sta_io);
 	if (result != DOCA_SUCCESS) {
-		fprintf(stderr, "doca_sta_add_dev failed: %s\n", doca_error_get_descr(result));
+		fprintf(stderr, "doca_sta_set_max_sta_io(%u) failed: %s\n",
+			app.cfg.max_sta_io, doca_error_get_descr(result));
 		cleanup(&app);
 		return 1;
+	}
+	printf("[OK] doca_sta_set_max_sta_io(%u)\n", app.cfg.max_sta_io);
+
+	if (!app.cfg.skip_add_dev) {
+		result = doca_sta_add_dev(app.sta, app.sf_dev);
+		if (result != DOCA_SUCCESS) {
+			fprintf(stderr, "doca_sta_add_dev failed: %s\n", doca_error_get_descr(result));
+			cleanup(&app);
+			return 1;
+		}
+		printf("[OK] doca_sta_add_dev\n");
+	} else {
+		printf("[DBG] skipping doca_sta_add_dev for control-only diagnostic run\n");
 	}
 
 	app.main_ctx = doca_sta_as_ctx(app.sta);
