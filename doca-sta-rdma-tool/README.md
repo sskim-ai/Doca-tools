@@ -90,13 +90,13 @@ This tool currently validates main STA context bring-up and can optionally valid
 - STA pinned-memory allocator registration
 - STA resource/capability dump before start
 - `doca_sta` create/add_dev/start
+- optional `doca_sta_io` create/start with required disconnect, transport-error, and non-offload callbacks
 - progress engine integration
 
 It does not yet configure:
 
 - backend handles
 - subsystems / namespaces
-- `doca_sta_io`
 - QPs
 - remote IO submission
 

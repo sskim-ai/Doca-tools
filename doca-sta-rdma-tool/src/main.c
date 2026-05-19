@@ -17,6 +17,7 @@
 #include <doca_sta.h>
 #include <doca_sta_be.h>
 #include <doca_sta_io.h>
+#include <doca_sta_io_non_offload.h>
 #include <doca_sta_event.h>
 #include <doca_sta_mem.h>
 #include <doca_sta_subsystem.h>
@@ -341,6 +342,24 @@ register_sta_task_confs(struct doca_sta *sta)
 }
 
 
+static void
+on_sta_io_non_offload(struct doca_sta_qp_handle *qp_handle,
+			       union doca_data user_data,
+			       const uint8_t *nvme_cmd,
+			       uint8_t *payload,
+			       uint32_t payload_len,
+			       bool payload_valid,
+			       union doca_data non_offload_user_data)
+{
+	(void)qp_handle;
+	(void)user_data;
+	(void)nvme_cmd;
+	(void)payload;
+	(void)non_offload_user_data;
+	printf("[CB] STA IO non-offload command payload_len=%u payload_valid=%s\n",
+	       payload_len, payload_valid ? "true" : "false");
+}
+
 static doca_error_t
 register_sta_io_confs(struct doca_sta_io *sta_io)
 {
@@ -351,7 +370,23 @@ register_sta_io_confs(struct doca_sta_io *sta_io)
 	if (result != DOCA_SUCCESS)
 		return result;
 
-	return doca_sta_io_event_transport_err_register_cb(sta_io, on_sta_io_transport_err, user_data);
+	result = doca_sta_io_event_transport_err_register_cb(sta_io, on_sta_io_transport_err, user_data);
+	if (result != DOCA_SUCCESS)
+		return result;
+
+	result = doca_sta_io_non_offload_register_cb(sta_io, on_sta_io_non_offload, user_data);
+	if (result != DOCA_SUCCESS)
+		return result;
+
+	result = doca_sta_io_task_non_offload_set_rdma_write_send_conf(sta_io,
+									on_sta_task_complete,
+									on_sta_task_error);
+	if (result != DOCA_SUCCESS)
+		return result;
+
+	return doca_sta_io_task_non_offload_set_rdma_read_conf(sta_io,
+								    on_sta_task_complete,
+								    on_sta_task_error);
 }
 static doca_error_t
 register_sta_event_callbacks(struct doca_sta *sta)
