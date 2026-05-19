@@ -183,11 +183,12 @@ print_u16_result(const char *name, doca_error_t result, uint16_t value)
 }
 
 static void
-dump_sta_caps(struct doca_sta *sta)
+dump_sta_caps(const char *stage, struct doca_sta *sta)
 {
 	uint16_t value16 = 0;
 	uint32_t value32 = 0;
 
+	printf("[CAP] ---- %s ----\n", stage);
 	print_u32_result("max_devs", doca_sta_get_max_devs(&value32), value32);
 	value32 = 0;
 	print_u32_result("max_subsys", doca_sta_get_max_subsys(&value32), value32);
@@ -466,7 +467,7 @@ main(int argc, char **argv)
 		return 1;
 	}
 	printf("[OK] doca_sta_set_max_sta_io(%u)\n", app.cfg.max_sta_io);
-	dump_sta_caps(app.sta);
+	dump_sta_caps("after set_max_sta_io / before add_dev", app.sta);
 
 	if (!app.cfg.skip_add_dev) {
 		result = doca_sta_add_dev(app.sta, app.sf_dev);
@@ -476,6 +477,7 @@ main(int argc, char **argv)
 			return 1;
 		}
 		printf("[OK] doca_sta_add_dev\n");
+		dump_sta_caps("after add_dev", app.sta);
 	} else {
 		printf("[DBG] skipping doca_sta_add_dev for control-only diagnostic run\n");
 	}
@@ -511,6 +513,7 @@ main(int argc, char **argv)
 	}
 
 	dump_ctx_state("main_ctx(after connect)", app.main_ctx);
+	dump_sta_caps("after pe_connect / before start", app.sta);
 
 	result = doca_ctx_start(app.main_ctx);
 	if (result != DOCA_SUCCESS) {
