@@ -15,8 +15,11 @@
 #include <doca_log.h>
 #include <doca_pe.h>
 #include <doca_sta.h>
+#include <doca_sta_be.h>
 #include <doca_sta_event.h>
 #include <doca_sta_mem.h>
+#include <doca_sta_subsystem.h>
+#include <doca_sta_task.h>
 
 struct config {
 	const char *pf_dev;
@@ -286,6 +289,35 @@ on_sta_cqe_notify(const struct doca_sta_event_cqe_notify *event, union doca_data
 	(void)event;
 	(void)user_data;
 	printf("[CB] STA CQE notify event\n");
+}
+
+
+static void
+on_sta_task_complete(struct doca_sta_producer_task_send *task, union doca_data task_user_data)
+{
+	(void)task;
+	(void)task_user_data;
+	printf("[CB] STA producer task completed\n");
+}
+
+static void
+on_sta_task_error(struct doca_sta_producer_task_send *task, union doca_data task_user_data)
+{
+	(void)task;
+	(void)task_user_data;
+	printf("[CB] STA producer task error\n");
+}
+
+static doca_error_t
+register_sta_task_confs(struct doca_sta *sta)
+{
+	doca_error_t result;
+
+	result = doca_sta_subsystem_task_rm_ns_set_conf(sta, on_sta_task_complete, on_sta_task_error);
+	if (result != DOCA_SUCCESS)
+		return result;
+
+	return doca_sta_be_task_destroy_queue_set_conf(sta, on_sta_task_complete, on_sta_task_error);
 }
 
 static doca_error_t
@@ -755,6 +787,14 @@ main(int argc, char **argv)
 		return 1;
 	}
 	printf("[OK] STA pinned memory allocator registered\n");
+
+	result = register_sta_task_confs(app.sta);
+	if (result != DOCA_SUCCESS) {
+		fprintf(stderr, "register STA task confs failed: %s\n", doca_error_get_descr(result));
+		cleanup(&app);
+		return 1;
+	}
+	printf("[OK] STA task configurations registered\n");
 
 	result = doca_sta_set_max_sta_io(app.sta, app.cfg.max_sta_io);
 	if (result != DOCA_SUCCESS) {
