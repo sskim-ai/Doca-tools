@@ -25,6 +25,7 @@ struct config {
 	const char *pf_dev;
 	const char *sf_dev;
 	uint16_t max_sta_io;
+	uint32_t hold_seconds;
 	bool skip_add_dev;
 };
 
@@ -520,6 +521,30 @@ dump_sta_caps(const char *stage, struct doca_sta *sta)
 }
 
 static doca_error_t
+wait_until_state(struct doca_pe *pe, struct doca_ctx *ctx, enum doca_ctx_states target, const char *name)
+{
+	for (int i = 0; i < 20000; ++i) {
+		enum doca_ctx_states state;
+		doca_error_t result = doca_ctx_get_state(ctx, &state);
+
+		if (result != DOCA_SUCCESS)
+			return result;
+
+		if ((i % 100) == 0)
+			printf("[DBG] %s wait_loop=%d state=%s target=%s\n",
+			       name, i, ctx_state_to_str(state), ctx_state_to_str(target));
+
+		if (state == target)
+			return DOCA_SUCCESS;
+
+		(void)doca_pe_progress(pe);
+		usleep(1000);
+	}
+
+	return DOCA_ERROR_TIME_OUT;
+}
+
+static doca_error_t
 wait_until_running(struct doca_pe *pe, struct doca_ctx *ctx, const char *name)
 {
 	for (int i = 0; i < 5000; ++i) {
@@ -615,10 +640,13 @@ open_local_dev(const struct device_selector *selector, struct doca_dev **out)
 static void
 cleanup(struct app_state *app)
 {
-	if (app->main_ctx != NULL) {
-		(void)doca_ctx_stop(app->main_ctx);
-		for (int i = 0; i < 5000; ++i)
-			(void)doca_pe_progress(app->main_pe);
+	if (app->main_ctx != NULL && app->main_pe != NULL) {
+		doca_error_t result = doca_ctx_stop(app->main_ctx);
+		if (result != DOCA_SUCCESS && result != DOCA_ERROR_IN_PROGRESS && result != DOCA_ERROR_BAD_STATE)
+			fprintf(stderr, "[WARN] doca_ctx_stop failed: %s\n", doca_error_get_descr(result));
+		result = wait_until_state(app->main_pe, app->main_ctx, DOCA_CTX_STATE_IDLE, "main_ctx(stop)");
+		if (result != DOCA_SUCCESS)
+			fprintf(stderr, "[WARN] main ctx did not return to IDLE before cleanup: %s\n", doca_error_get_descr(result));
 	}
 
 	if (app->main_pe != NULL)
@@ -639,8 +667,8 @@ usage(const char *prog)
 {
 	fprintf(stderr,
 		"Usage:\n"
-		"  %s --pf-dev <PCI_BDF|IBDEV|IFACE> --sf-dev <PCI_BDF|IFACE|IBDEV> [--max-sta-io N]\n"
-		"  %s --pf-dev <PCI_BDF|IBDEV|IFACE> --skip-add-dev [--max-sta-io N]\n"
+		"  %s --pf-dev <PCI_BDF|IBDEV|IFACE> --sf-dev <PCI_BDF|IFACE|IBDEV> [--max-sta-io N] [--hold-seconds N]\n"
+		"  %s --pf-dev <PCI_BDF|IBDEV|IFACE> --skip-add-dev [--max-sta-io N] [--hold-seconds N]\n"
 		"  %s --list\n",
 		prog, prog, prog);
 }
@@ -678,6 +706,18 @@ parse_args(int argc, char **argv, struct config *cfg)
 
 		if (strcmp(argv[i], "--skip-add-dev") == 0) {
 			cfg->skip_add_dev = true;
+			continue;
+		}
+
+		if (strcmp(argv[i], "--hold-seconds") == 0 && i + 1 < argc) {
+			char *end = NULL;
+			unsigned long value = strtoul(argv[++i], &end, 0);
+
+			if (end == argv[i] || *end != '\0' || value > UINT32_MAX) {
+				fprintf(stderr, "invalid --hold-seconds value: %s\n", argv[i]);
+				return -1;
+			}
+			cfg->hold_seconds = (uint32_t)value;
 			continue;
 		}
 
@@ -731,10 +771,11 @@ main(int argc, char **argv)
 	if (!app.cfg.skip_add_dev)
 		sf_selector = parse_selector(app.cfg.sf_dev);
 
-	printf("[DBG] requested pf_dev=%s sf_dev=%s max_sta_io=%u skip_add_dev=%s\n",
+	printf("[DBG] requested pf_dev=%s sf_dev=%s max_sta_io=%u hold_seconds=%u skip_add_dev=%s\n",
 	       app.cfg.pf_dev,
 	       app.cfg.sf_dev != NULL ? app.cfg.sf_dev : "<none>",
 	       app.cfg.max_sta_io,
+	       app.cfg.hold_seconds,
 	       app.cfg.skip_add_dev ? "yes" : "no");
 
 	result = open_local_dev(&pf_selector, &app.pf_dev);
@@ -853,13 +894,15 @@ main(int argc, char **argv)
 	dump_sta_caps("after pe_connect / before start", app.sta);
 
 	result = doca_ctx_start(app.main_ctx);
-	if (result != DOCA_SUCCESS) {
+	if (result != DOCA_SUCCESS && result != DOCA_ERROR_IN_PROGRESS) {
 		fprintf(stderr, "doca_ctx_start failed immediately: %s\n", doca_error_get_descr(result));
 		dump_ctx_state("main_ctx(after failed start)", app.main_ctx);
 		progress_ctx_for_debug(app.main_pe, app.main_ctx, "main_ctx(post-fail)", 500);
 		cleanup(&app);
 		return 1;
 	}
+	if (result == DOCA_ERROR_IN_PROGRESS)
+		printf("[OK] doca_ctx_start returned IN_PROGRESS; waiting for RUNNING\n");
 
 	dump_ctx_state("main_ctx(after start call)", app.main_ctx);
 	progress_ctx_for_debug(app.main_pe, app.main_ctx, "main_ctx(post-start)", 1000);
@@ -872,6 +915,15 @@ main(int argc, char **argv)
 	}
 
 	printf("[OK] main STA context is RUNNING\n");
+	if (app.cfg.hold_seconds > 0) {
+		printf("[INFO] holding RUNNING context for %u seconds\n", app.cfg.hold_seconds);
+		for (uint32_t sec = 0; sec < app.cfg.hold_seconds; ++sec) {
+			for (int i = 0; i < 1000; ++i) {
+				(void)doca_pe_progress(app.main_pe);
+				usleep(1000);
+			}
+		}
+	}
 	cleanup(&app);
 	return 0;
 }

@@ -44,7 +44,7 @@ List what DOCA sees on the host:
 Run the main-context probe with the currently validated host NIC-mode pairing:
 
 ```bash
-./build/doca-sta-rdma-tool --pf-dev mlx5_2 --sf-dev mlx5_4 --max-sta-io 1
+./build/doca-sta-rdma-tool --pf-dev mlx5_2 --sf-dev mlx5_4 --max-sta-io 1 --hold-seconds 10
 ```
 
 In the current BF3 NIC-mode setup:
@@ -59,6 +59,8 @@ The following is intentionally not the preferred start pairing now:
 ```
 
 That form can open DOCA devices, but it does not distinguish the FlexIO-capable ibdev instance from the SF traffic ibdev instance when multiple DOCA devinfos share the same PCI address.
+
+`doca_ctx_start()` may return `DOCA_ERROR_IN_PROGRESS`; the tool treats that as a successful asynchronous start and waits for `RUNNING`. `--hold-seconds` keeps the RUNNING context alive before cleanup so runtime state can be observed.
 
 For diagnostics, a control-only start can be attempted without adding an SF traffic device:
 
