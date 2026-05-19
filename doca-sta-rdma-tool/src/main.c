@@ -1,14 +1,22 @@
+#include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+#include <sys/mman.h>
 
 #include <doca_ctx.h>
 #include <doca_dev.h>
 #include <doca_error.h>
+#include <doca_log.h>
 #include <doca_pe.h>
 #include <doca_sta.h>
+#include <doca_sta_event.h>
+#include <doca_sta_mem.h>
 
 struct config {
 	const char *pf_dev;
@@ -24,6 +32,7 @@ struct app_state {
 	struct doca_sta *sta;
 	struct doca_ctx *main_ctx;
 	struct doca_pe *main_pe;
+	struct doca_log_backend *sdk_log_backend;
 };
 
 enum selector_type {
@@ -36,6 +45,265 @@ struct device_selector {
 	enum selector_type type;
 	const char *value;
 };
+
+
+struct allocation_record {
+	void *ptr;
+	size_t size;
+	struct allocation_record *next;
+};
+
+static struct allocation_record *g_allocations;
+static int g_pagemap_fd = -1;
+static size_t g_page_size;
+
+static size_t
+page_size_get(void)
+{
+	if (g_page_size == 0)
+		g_page_size = (size_t)sysconf(_SC_PAGESIZE);
+	return g_page_size;
+}
+
+static int
+pagemap_open(void)
+{
+	if (g_pagemap_fd >= 0)
+		return g_pagemap_fd;
+
+	g_pagemap_fd = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+	return g_pagemap_fd;
+}
+
+static uint64_t
+virt_to_phys_single_page(const void *addr)
+{
+	const size_t page_sz = page_size_get();
+	const uint64_t virt = (uint64_t)(uintptr_t)addr;
+	const uint64_t page_index = virt / page_sz;
+	const uint64_t offset = virt % page_sz;
+	const int fd = pagemap_open();
+	uint64_t entry = 0;
+	const off_t file_off = (off_t)(page_index * sizeof(uint64_t));
+	ssize_t n;
+	uint64_t pfn;
+
+	if (fd < 0)
+		return DOCA_STA_VTOPHYS_ERROR;
+
+	n = pread(fd, &entry, sizeof(entry), file_off);
+	if (n != (ssize_t)sizeof(entry))
+		return DOCA_STA_VTOPHYS_ERROR;
+
+	if (((entry >> 63U) & 0x1U) == 0)
+		return DOCA_STA_VTOPHYS_ERROR;
+
+	pfn = entry & ((1ULL << 55U) - 1ULL);
+	if (pfn == 0)
+		return DOCA_STA_VTOPHYS_ERROR;
+
+	return (pfn * page_sz) + offset;
+}
+
+static size_t
+normalize_alignment(size_t align)
+{
+	size_t a = align > sizeof(void *) ? align : sizeof(void *);
+	size_t pow2 = 1;
+
+	while (pow2 < a)
+		pow2 <<= 1U;
+
+	return pow2 > page_size_get() ? pow2 : page_size_get();
+}
+
+static void
+touch_pages(void *buf, size_t size)
+{
+	volatile unsigned char *p = (volatile unsigned char *)buf;
+	const size_t page_sz = page_size_get();
+
+	for (size_t i = 0; i < size; i += page_sz)
+		p[i] = 0;
+
+	if (size > 0)
+		p[size - 1] = 0;
+}
+
+static int
+allocation_record_add(void *ptr, size_t size)
+{
+	struct allocation_record *rec = calloc(1, sizeof(*rec));
+
+	if (rec == NULL)
+		return -1;
+
+	rec->ptr = ptr;
+	rec->size = size;
+	rec->next = g_allocations;
+	g_allocations = rec;
+	return 0;
+}
+
+static size_t
+allocation_record_remove(void *ptr)
+{
+	struct allocation_record **cur = &g_allocations;
+
+	while (*cur != NULL) {
+		struct allocation_record *rec = *cur;
+
+		if (rec->ptr == ptr) {
+			size_t size = rec->size;
+			*cur = rec->next;
+			free(rec);
+			return size;
+		}
+
+		cur = &rec->next;
+	}
+
+	return 0;
+}
+
+static void *
+sta_zmalloc_cb(size_t size, size_t align, uint64_t *phys_addr)
+{
+	const size_t use_align = normalize_alignment(align);
+	void *ptr = NULL;
+	uint64_t phys;
+	int rc;
+
+	rc = posix_memalign(&ptr, use_align, size);
+	if (rc != 0) {
+		printf("[ALLOC] posix_memalign failed size=%zu align=%zu rc=%d (%s)\n",
+		       size, use_align, rc, strerror(rc));
+		return NULL;
+	}
+
+	memset(ptr, 0, size);
+	touch_pages(ptr, size);
+
+	if (mlock(ptr, size) != 0) {
+		printf("[ALLOC] mlock failed size=%zu ptr=%p errno=%d (%s)\n",
+		       size, ptr, errno, strerror(errno));
+		free(ptr);
+		return NULL;
+	}
+
+	phys = virt_to_phys_single_page(ptr);
+	if (phys == DOCA_STA_VTOPHYS_ERROR) {
+		printf("[ALLOC] first-page vtophys failed size=%zu ptr=%p\n", size, ptr);
+		(void)munlock(ptr, size);
+		free(ptr);
+		return NULL;
+	}
+
+	if (allocation_record_add(ptr, size) != 0) {
+		printf("[ALLOC] allocation record failed size=%zu ptr=%p\n", size, ptr);
+		(void)munlock(ptr, size);
+		free(ptr);
+		return NULL;
+	}
+
+	if (phys_addr != NULL)
+		*phys_addr = phys;
+
+	printf("[ALLOC] ok size=%zu align=%zu ptr=%p first_phys=0x%lx\n",
+	       size, use_align, ptr, (unsigned long)phys);
+	return ptr;
+}
+
+static void
+sta_free_cb(void *buf)
+{
+	size_t size;
+
+	if (buf == NULL)
+		return;
+
+	size = allocation_record_remove(buf);
+	if (size != 0)
+		(void)munlock(buf, size);
+
+	printf("[ALLOC] free ptr=%p size=%zu\n", buf, size);
+	free(buf);
+}
+
+static uint64_t
+sta_vtophys_cb(const void *buf, uint32_t size)
+{
+	const size_t page_sz = page_size_get();
+	const uintptr_t start = (uintptr_t)buf;
+	const uintptr_t first_page_virt = start & ~((uintptr_t)page_sz - 1U);
+	const size_t offset_in_first_page = (size_t)(start - first_page_virt);
+	const size_t total_span = offset_in_first_page + (size_t)size;
+	const size_t num_pages = (total_span + page_sz - 1U) / page_sz;
+	const uint64_t first_phys = virt_to_phys_single_page(buf);
+	const uint64_t first_phys_page = first_phys & ~((uint64_t)page_sz - 1ULL);
+
+	if (buf == NULL || size == 0 || first_phys == DOCA_STA_VTOPHYS_ERROR) {
+		printf("[ALLOC] vtophys failed buf=%p size=%u\n", buf, size);
+		return DOCA_STA_VTOPHYS_ERROR;
+	}
+
+	for (size_t i = 1; i < num_pages; ++i) {
+		const void *page_ptr = (const void *)(first_page_virt + (i * page_sz));
+		const uint64_t phys_i = virt_to_phys_single_page(page_ptr);
+		const uint64_t phys_i_page = phys_i & ~((uint64_t)page_sz - 1ULL);
+
+		if (phys_i == DOCA_STA_VTOPHYS_ERROR || phys_i_page != first_phys_page + (i * page_sz)) {
+			printf("[ALLOC] vtophys non-contiguous/fail buf=%p size=%u page=%zu\n", buf, size, i);
+			return DOCA_STA_VTOPHYS_ERROR;
+		}
+	}
+
+	printf("[ALLOC] vtophys buf=%p size=%u phys=0x%lx\n", buf, size, (unsigned long)first_phys);
+	return first_phys;
+}
+
+static void
+on_sta_be_timeout(const struct doca_sta_event_be_timeout *event, union doca_data user_data)
+{
+	(void)event;
+	(void)user_data;
+	printf("[CB] STA backend timeout event\n");
+}
+
+static void
+on_sta_eu_err(const struct doca_sta_event_eu_err *event, union doca_data user_data)
+{
+	bool fatal = false;
+
+	(void)user_data;
+	(void)doca_sta_event_eu_err_is_fatal_error(event, &fatal);
+	printf("[CB] STA EU error event fatal=%s\n", fatal ? "true" : "false");
+}
+
+static void
+on_sta_cqe_notify(const struct doca_sta_event_cqe_notify *event, union doca_data user_data)
+{
+	(void)event;
+	(void)user_data;
+	printf("[CB] STA CQE notify event\n");
+}
+
+static doca_error_t
+register_sta_event_callbacks(struct doca_sta *sta)
+{
+	union doca_data user_data = {0};
+	doca_error_t result;
+
+	result = doca_sta_event_be_timeout_register_cb(sta, on_sta_be_timeout, user_data);
+	if (result != DOCA_SUCCESS)
+		return result;
+
+	result = doca_sta_event_eu_err_register_cb(sta, on_sta_eu_err, user_data);
+	if (result != DOCA_SUCCESS)
+		return result;
+
+	return doca_sta_event_cqe_notify_register_cb(sta, on_sta_cqe_notify, user_data);
+}
 
 static const char *
 ctx_state_to_str(enum doca_ctx_states state)
@@ -406,6 +674,19 @@ main(int argc, char **argv)
 	doca_error_t result;
 	int parse_rc;
 
+	result = doca_log_backend_create_standard();
+	if (result != DOCA_SUCCESS)
+		fprintf(stderr, "[WARN] doca_log_backend_create_standard failed: %s\n", doca_error_get_descr(result));
+
+	result = doca_log_backend_create_with_file_sdk(stdout, &app.sdk_log_backend);
+	if (result == DOCA_SUCCESS) {
+		result = doca_log_backend_set_sdk_level(app.sdk_log_backend, DOCA_LOG_LEVEL_DEBUG);
+		if (result != DOCA_SUCCESS)
+			fprintf(stderr, "[WARN] doca_log_backend_set_sdk_level failed: %s\n", doca_error_get_descr(result));
+	} else {
+		fprintf(stderr, "[WARN] doca_log_backend_create_with_file_sdk failed: %s\n", doca_error_get_descr(result));
+	}
+
 	parse_rc = parse_args(argc, argv, &app.cfg);
 	if (parse_rc > 0)
 		return 0;
@@ -458,6 +739,22 @@ main(int argc, char **argv)
 		cleanup(&app);
 		return 1;
 	}
+
+	result = register_sta_event_callbacks(app.sta);
+	if (result != DOCA_SUCCESS) {
+		fprintf(stderr, "register STA event callbacks failed: %s\n", doca_error_get_descr(result));
+		cleanup(&app);
+		return 1;
+	}
+	printf("[OK] STA event callbacks registered\n");
+
+	result = doca_sta_mem_allocator_register(app.sta, sta_zmalloc_cb, sta_free_cb, sta_vtophys_cb);
+	if (result != DOCA_SUCCESS) {
+		fprintf(stderr, "doca_sta_mem_allocator_register failed: %s\n", doca_error_get_descr(result));
+		cleanup(&app);
+		return 1;
+	}
+	printf("[OK] STA pinned memory allocator registered\n");
 
 	result = doca_sta_set_max_sta_io(app.sta, app.cfg.max_sta_io);
 	if (result != DOCA_SUCCESS) {
